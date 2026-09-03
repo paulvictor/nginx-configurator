@@ -62,16 +62,62 @@ executable nginx-configurator
     main-is:          Main.hs
 
     -- Modules included in this executable, other than Main.
-    -- other-modules:
+    other-modules:    Types
+                    , Grouping
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
     build-depends:    base ^>=4.20.2.0
+                    , aeson
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , http-conduit
+                    , http-types
+                    , indexed-traversable
+                    , optparse-applicative
+                    , text
+                    , time
+                    , vector
 
     -- Directories containing source files.
     hs-source-dirs:   app
 
     -- Base language which the package is written in.
     default-language: Haskell2010
+
+test-suite nginx-configurator-test
+    -- Import common warning flags.
+    import:           warnings
+
+    -- Base language which the package is written in.
+    default-language: Haskell2010
+
+    -- The interface type and version of the test suite.
+    type:             exitcode-stdio-1.0
+
+    -- Directories containing source files.
+    hs-source-dirs:   test, app
+
+    -- The entrypoint to the test suite.
+    main-is:          Spec.hs
+
+    -- Modules shared with the executable, recompiled here since there's no
+    -- library component to depend on instead.
+    other-modules:    Types
+                    , Grouping
+
+    -- Test dependencies.
+    build-depends:    base ^>=4.20.2.0
+                    , aeson
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , hspec
+                    , indexed-traversable
+                    , text
+                    , vector
