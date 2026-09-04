@@ -26,6 +26,7 @@
 
         devShells.default = haskellPackages.shellFor {
           packages = _: [ package ];
+          withHoogle = true;
 
           nativeBuildInputs = with haskellPackages; [
             cabal-install

@@ -83,6 +83,10 @@ executable nginx-configurator
                     , text
                     , time
                     , vector
+                    , lens
+                    , data-default
+                    , data-default-class
+                    , lens-aeson
 
     -- Directories containing source files.
     hs-source-dirs:   app
@@ -121,3 +125,7 @@ test-suite nginx-configurator-test
                     , indexed-traversable
                     , text
                     , vector
+                    , lens
+                    , data-default
+                    , data-default-class
+                    , lens-aeson
