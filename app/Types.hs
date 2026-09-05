@@ -21,13 +21,28 @@ import Data.Aeson.Types (Parser)
 import Data.Default.Class (Default (..))
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Text.Strict.Lens (packed)
 import GHC.Generics (Generic)
 
--- | Anything that can turn itself into a fragment of nginx config text,
--- regardless of where in the KV tree (or the assembled config) it came from.
-class ToNginxConf a where
-  toNginxConf :: a -> Text
+-- ===================== Named =====================
+
+-- | A server's/upstream's own name always comes from the same place - the
+-- Consul KV key - never from anywhere else in the JSON body. Both
+-- 'Server' and 'Upstream' are just 'Named' specialized over their own
+-- settings type ('ServerConfig'/'UpstreamConfig' respectively, see those
+-- sections below) rather than each hand-rolling an identical "name ::
+-- Text" field, so 'HasName'/'HasConfig' (from 'makeFieldsNoPrefix' below)
+-- are shared across both. No 'FromJSON' instance of its own: 'Named'
+-- values are only ever built directly - by Main.hs's `decodeKvEntry`,
+-- which already knows the name from the KV key it just classified and
+-- doesn't need to re-derive it from a "name" field in the JSON body at
+-- all, or, in tests, by wrapping a decoded 'ServerConfig'/'UpstreamConfig'
+-- with a name of the test's choosing.
+data Named a = Named
+  { _name   :: Text
+  , _config :: a
+  } deriving (Show, Generic)
+
+makeFieldsNoPrefix ''Named
 
 -- ===================== shared key/value parameter helpers =====================
 
@@ -35,24 +50,13 @@ class ToNginxConf a where
 -- shared by UpstreamServer's "server" parameters and Resolver's, which
 -- have the exact same shape: "key=value", or a bare keyword when the
 -- value is true. Proxy's own parameters allow richer shapes
--- (Array/Object) and so validate/render separately (checkProxyParam/
--- renderProxyParam below).
+-- (Array/Object) and so validate/render separately (checkRawProxyParam
+-- below / renderProxyBlock in NginxConf.hs).
 checkIsRawValue :: Key -> Value -> Parser ()
 checkIsRawValue k v =
-  if has (_Bool . united `failing` _Number . united `failing` _String . united) v
+  if has (_Bool.united `failing` _Number.united `failing` _String.united) v
   then pure ()
   else fail ("parameter \"" <> Key.toString k <> "\" must be a bool, number, or string")
-
--- | Renders one parameter: a bare keyword when true (e.g. "backup"),
--- omitted entirely when false (e.g. a Value of Bool False), or "key=value"
--- for anything else. Value shapes other than Bool/Number/String are
--- rejected by checkIsRawValue above, so this is total in practice.
-renderRawKeyValue :: Key -> Value -> [Text]
-renderRawKeyValue k = \case
-  Bool True -> [ Key.toText k ]
-  Number n  -> [ Key.toText k <> "=" <> (truncate n :: Integer) ^. re _Show . packed ]
-  String s  -> [ Key.toText k <> "=" <> s ]
-  _         -> []
 
 -- ===================== Resolver =====================
 
@@ -84,10 +88,6 @@ instance FromJSON Resolver where
     let rest = KM.delete "address" o
     itraverse_ checkIsRawValue rest
     pure (Resolver addr rest)
-
-instance ToNginxConf Resolver where
-  toNginxConf (Resolver addr params) =
-    T.unwords ([ "resolver", addr ] <> ifoldMap renderRawKeyValue params) <> ";"
 
 -- ===================== Proxy =====================
 
@@ -151,38 +151,15 @@ parseProxyParams given = do
 
     checkRawProxyParam :: Key -> Value -> Parser ()
     checkRawProxyParam k v =
-      if has (_String . united `failing` _Number . united) v
+      if has (_String.united `failing` _Number.united) v
       then pure ()
       else fail ("proxy parameter \"" <> Key.toString k <> "\" must be a string or number")
 
 -- | Parses an optional "proxy" object field, defaulting to 'def' when the
--- key is absent. Shared by Location's and Server's FromJSON instances.
+-- key is absent. Shared by Location's and ServerConfig's FromJSON
+-- instances.
 parseOptionalProxy :: Object -> Parser ProxyParameters
 parseOptionalProxy o = o .:? "proxy" >>= maybe (pure def) parseProxyParams
-
-renderProxyBlock :: ProxyParameters -> Text
-renderProxyBlock params =
-  T.intercalate "\n" $
-    concatMap renderRawProxyParam (KM.toList (params ^. rawParams))
-    <> [ "proxy_next_upstream " <> T.unwords nextUp <> ";" | not (null nextUp) ]
-    <> [ "proxy_set_header " <> Key.toText hName <> " \"" <> hValue <> "\";"
-       | (hName, hValue) <- KM.toList (params ^. setHeader)
-       ]
-  where
-    nextUp = params ^. nextUpstream
-
-    renderRawProxyParam (k, String s) = [ Key.toText k <> " " <> s <> ";" ]
-    renderRawProxyParam (k, Number n) = [ Key.toText k <> " " <> (truncate n :: Integer) ^. re _Show . packed <> ";" ]
-    renderRawProxyParam (_, _) = []
-
--- | Prefix every line of a (possibly multi-line) rendered sub-block with
--- the given indent - used to embed a shared block (like the proxy params
--- map) at whatever nesting depth the caller is at.
-indentLines :: Text -> Text -> Text
-indentLines indent block = T.intercalate "\n" ((indent <>) <$> T.lines block)
-
-renderHeader :: Text -> (Text, Text) -> Text
-renderHeader indent (hName, hValue) = indent <> "add_header " <> hName <> " \"" <> hValue <> "\" always;"
 
 -- ===================== Upstream =====================
 
@@ -236,18 +213,13 @@ instance FromJSON UpstreamServer where
         -- not enforced here, caught by "nginx -t" like any other config error.
         ]
 
-instance ToNginxConf UpstreamServer where
-  toNginxConf (UpstreamServer addr params) =
-    (<> ";") $ T.unwords $ [ "server", addr ] <> ifoldMap renderRawKeyValue params
-
--- | "name" is shared with Server's own KV-key-derived name field below -
--- `makeFieldsNoPrefix` joins the same common `HasName`/`name` lens class
--- across both (and the same `HasResolver`/`resolver` lens, also shared
--- with Location) - what unifies a shared field under one class is the
--- final derived name ("name"/"resolver"), not which type declared it.
-data Upstream = Upstream
-  { _name              :: Text          -- from the KV key, not the JSON body
-  , _resolver          :: Maybe Resolver
+-- | `resolver` joins the same `HasResolver` class Location's/
+-- ServerConfig's own field of the same name established - what unifies a
+-- shared field under one class is the final derived name, not which type
+-- declared it. `Upstream` itself is `Named UpstreamConfig` below - its
+-- name comes from `Named`, not from a field here.
+data UpstreamConfig = UpstreamConfig
+  { _resolver          :: Maybe Resolver
   , _servers           :: [UpstreamServer]
   , _keepalive         :: Maybe Int
   , _keepaliveRequests :: Maybe Int
@@ -255,28 +227,22 @@ data Upstream = Upstream
   , _zoneSize          :: Maybe Text    -- "2m"
   } deriving (Show, Generic)
 
-makeFieldsNoPrefix ''Upstream
+makeFieldsNoPrefix ''UpstreamConfig
 
-instance FromJSON Upstream where
-  parseJSON = withObject "Upstream" $ \o -> Upstream
-    <$> o .:  "name"  -- injected by Grouping.hs from the KV key before this ever runs
-    <*> o .:? "resolver"
+instance FromJSON UpstreamConfig where
+  parseJSON = withObject "UpstreamConfig" $ \o -> UpstreamConfig
+    <$> o .:? "resolver"
     <*> o .:  "servers"
     <*> o .:? "keepalive"
     <*> o .:? "keepalive_requests"
     <*> o .:? "keepalive_timeout"
     <*> o .:? "zone_size"
 
-instance ToNginxConf Upstream where
-  toNginxConf u = T.unlines $
-    [ "upstream " <> u ^. name <> " {" ]
-    <> maybe [] (\r -> [ "  " <> toNginxConf r ]) (u ^. resolver)
-    <> (("  " <>) . toNginxConf <$> u ^. servers)
-    <> maybe [] (\n -> [ "  keepalive " <> n ^. re _Show . packed <> ";" ]) (u ^. keepalive)
-    <> maybe [] (\n -> [ "  keepalive_requests " <> n ^. re _Show . packed <> ";" ]) (u ^. keepaliveRequests)
-    <> maybe [] (\t -> [ "  keepalive_timeout " <> t <> ";" ]) (u ^. keepaliveTimeout)
-    <> maybe [] (\z -> [ "  zone " <> u ^. name <> " " <> z <> ";" ]) (u ^. zoneSize)
-    <> [ "}" ]
+
+-- | The KV entity itself - see 'Named'\'s own doc comment for why its
+-- name lives outside 'UpstreamConfig'. Rendering (NginxConf instance)
+-- lives in NginxConf.hs, not here.
+type Upstream = Named UpstreamConfig
 
 -- ===================== Location =====================
 
@@ -298,7 +264,7 @@ instance FromJSON MatchType where
 -- | The three ngx_http_rewrite_module directives valid in server, location,
 -- AND if contexts - and per nginx's own docs, the only ones "100% safe"
 -- inside "if". Modeled as an ordered list wherever used (Location,
--- Server, ConditionalResponse below) because nginx evaluates
+-- ServerConfig, ConditionalResponse below) because nginx evaluates
 -- multiple such directives in the same context in the order they're
 -- written - e.g. the rewrite module's own docs example:
 --   rewrite ^(/download/.*)/media/(.*)\..*$ $1/mp3/$2.mp3 last;
@@ -351,17 +317,6 @@ instance FromJSON RewriteModuleDirective where
       "break"   -> pure Break
       other     -> fail ("unknown RewriteModuleDirective \"type\": " <> T.unpack other)
 
-instance ToNginxConf RewriteModuleDirective where
-  toNginxConf (Return c v) = "return " <> c ^. re _Show . packed <> maybe "" (" " <>) v <> ";"
-  toNginxConf (Rewrite rgx repl f) =
-    "rewrite " <> rgx <> " " <> repl <> maybe "" ((" " <>) . rewriteFlagText) f <> ";"
-    where
-      rewriteFlagText RewriteLast      = "last"
-      rewriteFlagText RewriteBreakFlag = "break"
-      rewriteFlagText RewriteRedirect  = "redirect"
-      rewriteFlagText RewritePermanent = "permanent"
-  toNginxConf Break = "break;"
-
 -- | ngx_http_access_module's "allow"/"deny" directives - valid in http,
 -- server, and location (http-level stays out of scope, same as
 -- resolver/proxy above). Modeled as an ordered list: nginx evaluates
@@ -391,12 +346,6 @@ instance FromJSON AccessRule where
   parseJSON = withObject "AccessRule" $ \o -> AccessRule
     <$> o .: "type"
     <*> o .: "value"
-
-instance ToNginxConf AccessRule where
-  toNginxConf r = accessDirectionText (r ^. direction) <> " " <> r ^. value <> ";"
-    where
-      accessDirectionText Allow = "allow"
-      accessDirectionText Deny  = "deny"
 
 -- | A narrowly-scoped model of nginx's "if" directive (ngx_http_rewrite_module)
 -- inside a location - deliberately NOT a generic escape hatch for arbitrary
@@ -436,24 +385,18 @@ instance FromJSON ConditionalResponse where
     <*> o .:? "extra_headers" .!= def
     <*> o .:? "rewrite_directives" .!= def
 
-instance ToNginxConf ConditionalResponse where
-  toNginxConf c = T.intercalate "\n" $
-    [ "if (" <> c ^. condition <> ") {" ]
-    <> (renderHeader "  " <$> c ^. extraHeaders)
-    <> (("  " <>) . toNginxConf <$> c ^. rewriteDirectives)
-    <> [ "}" ]
-
 -- | Bare field names + `makeFieldsNoPrefix`: `resolver` joins
--- Upstream's/Server's class, `proxy`/`rewriteDirectives`/
--- `extraHeaders`/`accessRules` join Server's (and
+-- UpstreamConfig's/ServerConfig's class, `proxy`/`rewriteDirectives`/
+-- `extraHeaders`/`accessRules` join ServerConfig's (and
 -- `rewriteDirectives`/`extraHeaders` also unify with
 -- ConditionalResponse's own fields the same way) - again, the derived
 -- name is what matters, not the source spelling. No `name` field here -
--- unlike Server's/Upstream's own KV-key-derived name, nothing ever reads
--- a Location's name: it's not rendered (the real, user-visible identity
--- of a location is its `path`), and locations don't get written to their
--- own output file the way servers/upstreams do, so there's nothing
--- downstream to pass it to.
+-- unlike `Server`'s/`Upstream`'s own KV-key-derived name (which lives on
+-- the shared `Named` wrapper, not on ServerConfig/UpstreamConfig
+-- themselves), nothing ever reads a Location's name: it's not rendered
+-- (the real, user-visible identity of a location is its `path`), and
+-- locations don't get written to their own output file the way
+-- servers/upstreams do, so there's nothing downstream to pass it to.
 data Location = Location
   { _path                 :: Text                     -- real nginx path, e.g. "/foo/bar"
   , _match                :: MatchType
@@ -464,23 +407,23 @@ data Location = Location
                                                        -- https upstream just as easily.
   , _proxy                :: ProxyParameters          -- proxy_http_version/proxy_set_header/
                                                        -- proxy_next_upstream* - only rendered when
-                                                       -- proxy_pass is set. Shared with Server's
+                                                       -- proxy_pass is set. Shared with ServerConfig's
                                                        -- field of the same name; see parseProxyParams.
   , _rewriteDirectives    :: [RewriteModuleDirective] -- return/rewrite/break, in order. Shared
-                                                       -- with Server's/ConditionalResponse's
+                                                       -- with ServerConfig's/ConditionalResponse's
                                                        -- field of the same name.
   , _accessLog            :: Bool
   , _extraIncludes        :: [Text]                   -- static, Nix-managed file paths
   , _extraHeaders         :: [(Text, Text)]           -- extra add_header name/value pairs (e.g. CORS).
-                                                       -- Shared with Server's field of the same
+                                                       -- Shared with ServerConfig's field of the same
                                                        -- name below.
   , _resolver             :: Maybe Resolver            -- valid here too (ngx_http_core_module).
-                                                       -- Shared with Upstream's/Server's field
-                                                       -- of the same name.
+                                                       -- Shared with UpstreamConfig's/ServerConfig's
+                                                       -- field of the same name.
   , _conditionalResponses :: [ConditionalResponse]    -- e.g. CORS preflight handling; see
                                                        -- ConditionalResponse's own doc comment
   , _accessRules          :: [AccessRule]              -- allow/deny, in order. Shared with
-                                                       -- Server's field of the same name.
+                                                       -- ServerConfig's field of the same name.
   } deriving (Show, Generic)
 
 makeFieldsNoPrefix ''Location
@@ -499,29 +442,6 @@ instance FromJSON Location where
     <*> o .:? "conditional_responses" .!= def
     <*> o .:? "access_rules" .!= def
 
-instance ToNginxConf Location where
-  toNginxConf l = T.unlines $
-    [ "  location " <> matchModifier (l ^. match) <> l ^. path <> " {" ]
-    <> (("    " <>) . toNginxConf <$> l ^. accessRules)
-    <> (indentLines "    " . toNginxConf <$> l ^. conditionalResponses)
-    <> maybe [] (\p ->
-         [ "    proxy_pass " <> p <> ";"
-         , indentLines "    " (renderProxyBlock (l ^. proxy))
-         ]
-       ) (l ^. proxyPass)
-    <> maybe [] (\r -> [ "    " <> toNginxConf r ]) (l ^. resolver)
-    <> (("    " <>) . toNginxConf <$> l ^. rewriteDirectives)
-    <> [ "    access_log off;" | not (l ^. accessLog) ]
-    <> ((\f -> "    include " <> f <> ";") <$> l ^. extraIncludes)
-    <> (renderHeader "    " <$> l ^. extraHeaders)
-    <> [ "  }" ]
-    where
-      matchModifier MatchExact       = "= "
-      matchModifier MatchPrefixExact = "^~ "
-      matchModifier MatchPrefix      = ""
-      matchModifier MatchRegex       = "~ "
-      matchModifier MatchRegexCI     = "~* "
-
 -- ===================== Server =====================
 
 data Listen = Listen
@@ -538,22 +458,22 @@ instance FromJSON Listen where
     <*> o .:? "ssl"  .!= def
     <*> o .:? "ipv6" .!= def
 
--- | Bare field names + `makeFieldsNoPrefix`: `name`/`resolver`/`proxy`/
+-- | Bare field names + `makeFieldsNoPrefix`: `resolver`/`proxy`/
 -- `extraHeaders`/`rewriteDirectives`/`accessRules` all join the classes
 -- Location (and, for the latter two, ConditionalResponse) already
--- established; `locations` is unique to Server. A server's own settings
--- and its child locations live in one type, not split into a Server/
--- ServerConfig pair - the KV wire format is already flat (one JSON object
--- per server, "locations" alongside its other fields, see DESIGN.md's KV
--- layout section), and nothing outside this file's own decode/render code
--- ever needed a "just the settings, no locations" value on its own, so a
--- separate ServerConfig type was only adding indirection with no payoff.
--- Upstreams are a separate top-level KV entity (nginx's own "upstream {}"
--- is an http-scope construct referenced by name from anywhere, not owned
--- by one server), so there's no upstreams field here at all.
-data Server = Server
-  { _name             :: Text          -- from the KV key, see Upstream.name above
-  , _serverName       :: [Text]        -- nginx's own "server_name name ...;" takes one or
+-- established; `locations` is unique to ServerConfig. A server's own
+-- settings and its child locations live in one type, not split further -
+-- the KV wire format is flat (one JSON object per server, "locations"
+-- alongside its other fields, see DESIGN.md's KV layout section), and
+-- nothing outside this file's own decode/render code ever needed a "just
+-- the settings, no locations" value on its own. `Server` itself is `Named
+-- ServerConfig` below - its name comes from `Named`, not from a field
+-- here, same reasoning as `UpstreamConfig` above. Upstreams are a
+-- separate top-level KV entity (nginx's own "upstream {}" is an
+-- http-scope construct referenced by name from anywhere, not owned by one
+-- server), so there's no upstreams field here at all.
+data ServerConfig = ServerConfig
+  { _serverName       :: [Text]        -- nginx's own "server_name name ...;" takes one or
                                        -- more space-separated names/wildcards/regexes; kept
                                        -- as its own required field (not folded into
                                        -- extra_directives) since it's a first-class,
@@ -587,21 +507,18 @@ data Server = Server
   , _locations        :: [Location]    -- attached from this KV entry's own "locations" object
   } deriving (Show, Generic)
 
-makeFieldsNoPrefix ''Server
+makeFieldsNoPrefix ''ServerConfig
 
 -- | Reads its own fields straight off the KV entry's top-level object,
--- and its child locations from that same object's "locations" key -
--- Grouping.hs's name-injection step (see there) has already put a real
--- "name" into this object and into each nested location by the time this
--- runs, so this is a plain, total decode with no KV-key-derived context
--- needed here at all.
-instance FromJSON Server where
-  parseJSON = withObject "Server" $ \o -> do
-    locsObj <- o .:? "locations" .!= KM.empty
-    locs <- traverse parseJSON (KM.elems locsObj)
-    Server
-      <$> o .:  "name"  -- injected by Grouping.hs from the KV key before this ever runs
-      <*> o .:  "server_name"
+-- and its child locations from that same object's "locations" key - a
+-- plain JSON array, not an object keyed by name, since nothing ever
+-- reads a Location's name (see Location's own doc comment) and inventing
+-- one per location just to satisfy an object shape would be pure
+-- busywork for whoever's writing these into Consul KV. This type's own
+-- "name" is handled one level up, by 'Named'\'s instance.
+instance FromJSON ServerConfig where
+  parseJSON = withObject "ServerConfig" $ \o -> ServerConfig
+      <$> o .:  "server_name"
       <*> o .:  "listen"
       <*> o .:? "http2" .!= def
       <*> o .:? "tls_cert_path"
@@ -611,30 +528,10 @@ instance FromJSON Server where
       <*> o .:? "rewrite_directives" .!= def
       <*> o .:? "access_rules" .!= def
       <*> o .:? "extra_directives" .!= def
-      <*> pure locs
+      <*> o .:? "locations" .!= def
 
-instance ToNginxConf Server where
-  toNginxConf srv = T.unlines $
-    [ "server {" ]
-    <> (renderListen <$> srv ^. listen)
-    <> [ "  server_name " <> T.unwords (srv ^. serverName) <> ";" ]
-    <> [ "  http2 on;" | srv ^. http2 ]
-    <> maybe [] (\c -> [ "  ssl_certificate " <> c <> ";"
-                        , "  ssl_certificate_key " <> c <> ";" ]) (srv ^. tlsCertPath)
-    <> (renderHeader "  " <$> srv ^. extraHeaders)
-    <> (("  " <>) . toNginxConf <$> srv ^. accessRules)
-    <> maybe [] (\r -> [ "  " <> toNginxConf r ]) (srv ^. resolver)
-    <> [ indentLines "  " (renderProxyBlock (srv ^. proxy)) ]
-    <> (("  " <>) . toNginxConf <$> srv ^. rewriteDirectives)
-    <> [ "  " <> k <> " " <> v <> ";" | (k, v) <- srv ^. extraDirectives ]
-    -- Mechanically derived, not user-set: nginx needs to tell the upstream
-    -- which port the client actually connected on.
-    <> [ "  proxy_set_header X-Forwarded-Port " <> ls ^. port . re _Show . packed <> ";"
-       | ls <- srv ^. listen, ls ^. ssl ]
-    <> (toNginxConf <$> srv ^. locations)
-    <> [ "}" ]
-    where
-      renderListen :: Listen -> Text
-      renderListen ls =
-        "  listen " <> (if ls ^. ipv6 then "[::]:" else "0.0.0.0:") <> ls ^. port . re _Show . packed
-          <> (if ls ^. ssl then " ssl;" else ";")
+-- | The KV entity itself - see 'Named'\'s own doc comment for why its
+-- name lives outside 'ServerConfig'. Rendering (NginxConf instance) lives
+-- in NginxConf.hs, and decoding one from a raw Consul KV entry
+-- (`decodeKvEntry`) lives in Main.hs, not here.
+type Server = Named ServerConfig

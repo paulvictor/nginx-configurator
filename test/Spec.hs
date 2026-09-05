@@ -1,32 +1,29 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- Worked-example unit tests for Types.hs and Grouping.hs, run against the
+-- Worked-example unit tests for Types.hs, run against the
 -- backend's current routes expressed as the servers/$server and
 -- upstreams/$upstream JSON documents this design expects from Consul KV,
 -- built as aeson 'Value's via 'object'/'.=' (which construct their
 -- underlying KeyMap via 'KM.fromList') rather than as raw JSON text.
 module Main where
 
-import Control.Lens (at, set, (&), (?~))
-import Data.Aeson (FromJSON (..), ToJSON (..), Value (..), encode, object, (.=))
+import Control.Lens (at, (&), (?~))
+import Data.Aeson (FromJSON (..), Value (..), object, toJSON, (.=))
 import Data.Aeson.Lens (_Object)
 import Data.Aeson.Types (parseEither)
-import qualified Data.ByteString.Base64.Lazy as B64L
-import qualified Data.ByteString.Lazy.Char8 as LBS8
-import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Text (Text)
 import Test.Hspec
 
-import Grouping
+import NginxConf
 import Types
 
 main :: IO ()
 main = hspec $ do
   describe "Upstream" $ do
     it "parses and renders backend" $ do
-      u <- decodeOrFail upstreamJson :: IO Upstream
-      let rendered = toNginxConf (set name "backend" u)
+      u <- decodeUpstreamEntry "backend" upstreamJson
+      let rendered = toNginxConf u
       rendered `shouldContainAll`
         [ "upstream backend {"
         , "keepalive 512;"
@@ -44,10 +41,9 @@ main = hspec $ do
                           , "weight=1", "resolve", "max_fails=2", "fail_timeout=60s" ]
 
     it "renders weight, backup and slow_start when set" $ do
-      u <- decodeOrFail
+      u <- decodeUpstreamEntry "weighted"
              (object
-               [ "name" .= ("unnamed" :: Text)
-               , "servers" .=
+               [ "servers" .=
                    [ object
                        [ "address" .= ("backend.service.consul:8080" :: Text)
                        , "parameters" .= object
@@ -58,20 +54,17 @@ main = hspec $ do
                        ]
                    ]
                ])
-             :: IO Upstream
-      let rendered = toNginxConf (set name "weighted" u)
+      let rendered = toNginxConf u
       directiveTokens "server backend.service.consul:8080" rendered
         `shouldMatchList` [ "server", "backend.service.consul:8080", "weight=5"
                           , "max_fails=3", "fail_timeout=10s", "backup", "slow_start=30s" ]
 
     it "defaults maxFails to 3 and failTimeout to 10s when omitted" $ do
-      u <- decodeOrFail
+      u <- decodeUpstreamEntry "minimal"
              (object
-               [ "name" .= ("unnamed" :: Text)
-               , "servers" .= [ object [ "address" .= ("backend.service.consul:8080" :: Text) ] ]
+               [ "servers" .= [ object [ "address" .= ("backend.service.consul:8080" :: Text) ] ]
                ])
-             :: IO Upstream
-      let rendered = toNginxConf (set name "minimal" u)
+      let rendered = toNginxConf u
       directiveTokens "server backend.service.consul:8080" rendered
         `shouldMatchList` [ "server", "backend.service.consul:8080", "weight=1"
                           , "max_fails=3", "fail_timeout=10s" ]
@@ -201,14 +194,9 @@ main = hspec $ do
 
   describe "Server" $ do
     it "renders the full foo server block from its parsed parts" $ do
-      server <- decodeOrFail
-                  (serverConfigJson & _Object . at "locations" ?~ object
-                    [ "health"   .= healthJson
-                    , "catchall" .= catchallJson
-                    , "bar"      .= barJson
-                    ])
-                :: IO Server
-      let rendered = toNginxConf (set name "foo" server)
+      server <- decodeServerEntry "foo"
+                  (serverConfigJson & _Object.at "locations" ?~ toJSON [ healthJson, catchallJson, barJson ])
+      let rendered = toNginxConf server
       rendered `shouldContainAll`
         [ "server {"
         , "listen 0.0.0.0:443 ssl;"
@@ -224,31 +212,26 @@ main = hspec $ do
         ]
 
     it "renders multiple server_name values space-separated on one directive" $ do
-      server <- decodeOrFail
+      server <- decodeServerEntry "foo"
                (object
-                 [ "name" .= ("unnamed" :: Text)
-                 , "server_name" .= (["foo", "www.foo", "*.foo.example"] :: [Text])
+                 [ "server_name" .= (["foo", "www.foo", "*.foo.example"] :: [Text])
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  ])
-               :: IO Server
-      toNginxConf (set name "foo" server) `shouldContainAll` [ "server_name foo www.foo *.foo.example;" ]
+      toNginxConf server `shouldContainAll` [ "server_name foo www.foo *.foo.example;" ]
 
     it "renders a server-level resolver (ngx_http_core_module allows this context)" $ do
-      server <- decodeOrFail
+      server <- decodeServerEntry "foo"
                (object
-                 [ "name" .= ("unnamed" :: Text)
-                 , "server_name" .= (["foo"] :: [Text])
+                 [ "server_name" .= (["foo"] :: [Text])
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  , "resolver" .= object [ "address" .= ("10.0.0.2:53" :: Text) ]
                  ])
-               :: IO Server
-      toNginxConf (set name "foo" server) `shouldContainAll` [ "resolver 10.0.0.2:53;" ]
+      toNginxConf server `shouldContainAll` [ "resolver 10.0.0.2:53;" ]
 
     it "renders extra_directives verbatim, including a directive given more than once" $ do
-      server <- decodeOrFail
+      server <- decodeServerEntry "foo"
                (object
-                 [ "name" .= ("unnamed" :: Text)
-                 , "server_name" .= (["foo"] :: [Text])
+                 [ "server_name" .= (["foo"] :: [Text])
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  , "extra_directives" .=
                      ([ ["client_max_body_size", "10m"]
@@ -256,26 +239,23 @@ main = hspec $ do
                       , ["error_page", "500 502 503 504 /50x.html"]
                       ] :: [[Text]])
                  ])
-               :: IO Server
-      toNginxConf (set name "foo" server) `shouldContainAll`
+      toNginxConf server `shouldContainAll`
         [ "client_max_body_size 10m;"
         , "error_page 404 /404.html;"
         , "error_page 500 502 503 504 /50x.html;"
         ]
 
     it "renders a server-level (site-wide) proxy block (keys given with the \"proxy_\" prefix already present)" $ do
-      server <- decodeOrFail
+      server <- decodeServerEntry "foo"
                (object
-                 [ "name" .= ("unnamed" :: Text)
-                 , "server_name" .= (["foo"] :: [Text])
+                 [ "server_name" .= (["foo"] :: [Text])
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  , "proxy" .= object
                      [ "proxy_next_upstream" .= (["error", "http_502"] :: [Text])
                      , "proxy_next_upstream_tries" .= (3 :: Int)
                      ]
                  ])
-               :: IO Server
-      let rendered = toNginxConf (set name "foo" server)
+      let rendered = toNginxConf server
       rendered `shouldContainAll`
         [ "proxy_next_upstream error http_502;"
         , "proxy_next_upstream_tries 3;"
@@ -285,10 +265,9 @@ main = hspec $ do
       rendered `shouldNotContainAny` [ "proxy_http_version", "proxy_next_upstream_timeout" ]
 
     it "renders ordered rewrite/rewrite/return directives (ngx_http_rewrite_module's own docs example)" $ do
-      server <- decodeOrFail
+      server <- decodeServerEntry "foo"
                (object
-                 [ "name" .= ("unnamed" :: Text)
-                 , "server_name" .= (["foo"] :: [Text])
+                 [ "server_name" .= (["foo"] :: [Text])
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  , "rewrite_directives" .=
                      [ object
@@ -306,8 +285,7 @@ main = hspec $ do
                      , object [ "type" .= ("return" :: Text), "code" .= (403 :: Int) ]
                      ]
                  ])
-               :: IO Server
-      let rendered = toNginxConf (set name "foo" server)
+      let rendered = toNginxConf server
       rendered `shouldContainAll`
         [ "rewrite ^(/download/.*)/media/(.*)\\..*$ $1/mp3/$2.mp3 last;"
         , "rewrite ^(/download/.*)/audio/(.*)\\..*$ $1/mp3/$2.ra last;"
@@ -321,106 +299,13 @@ main = hspec $ do
       (mediaPos < audioPos && audioPos < returnPos) `shouldBe` True
 
     it "renders break as a bare directive" $ do
-      server <- decodeOrFail
+      server <- decodeServerEntry "foo"
                (object
-                 [ "name" .= ("unnamed" :: Text)
-                 , "server_name" .= (["foo"] :: [Text])
+                 [ "server_name" .= (["foo"] :: [Text])
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  , "rewrite_directives" .= [ object [ "type" .= ("break" :: Text) ] ]
                  ])
-               :: IO Server
-      toNginxConf (set name "foo" server) `shouldContainAll` [ "break;" ]
-
-  describe "FromJSON failure modes" $ do
-    it "rejects a location JSON missing the required \"path\" field" $ do
-      case (parseEither parseJSON (object [ "match" .= ("prefix" :: Text) ]) :: Either String Location) of
-        Left _  -> pure ()
-        Right v -> expectationFailure ("expected a parse failure, got: " <> show v)
-
-    it "rejects an upstream JSON missing the required \"servers\" field" $ do
-      case (parseEither parseJSON (object [ "keepalive" .= (512 :: Int) ]) :: Either String Upstream) of
-        Left _  -> pure ()
-        Right v -> expectationFailure ("expected a parse failure, got: " <> show v)
-
-    it "rejects an UpstreamServer parameter whose value isn't a bool/number/string" $ do
-      case (parseEither parseJSON
-              (object
-                [ "address" .= ("x:80" :: Text)
-                , "parameters" .= object [ "weight" .= ([1, 2] :: [Int]) ]
-                ])
-              :: Either String UpstreamServer) of
-        Left _  -> pure ()
-        Right v -> expectationFailure ("expected a parse failure, got: " <> show v)
-
-    it "rejects an Entity JSON with no \"Value\"" $ do
-      case (parseEither parseJSON (object [ "Key" .= ("servers/foo" :: Text) ])
-              :: Either String Entity) of
-        Left err -> err `shouldSatisfy` ("has no value" `isInfixOf`)
-        Right _  -> expectationFailure "expected a parse failure"
-
-    it "rejects an Entity JSON whose \"Value\" isn't valid base64" $ do
-      case (parseEither parseJSON
-              (object
-                [ "Key" .= ("servers/foo" :: Text)
-                , "Value" .= ("not-valid-base64!!!" :: Text)
-                ])
-              :: Either String Entity) of
-        Left err -> err `shouldSatisfy` ("invalid base64" `isInfixOf`)
-        Right _  -> expectationFailure "expected a parse failure"
-
-    it "rejects an Entity JSON whose \"Value\" doesn't decode to a JSON object" $ do
-      -- base64 of "\"just a string\"" - valid base64, valid JSON, not an object
-      case (parseEither parseJSON
-              (object
-                [ "Key" .= ("servers/foo" :: Text)
-                , "Value" .= ("Imp1c3QgYSBzdHJpbmci" :: Text)
-                ])
-              :: Either String Entity) of
-        Left _  -> pure ()
-        Right v -> expectationFailure ("expected a parse failure, got: " <> show v)
-
-  describe "Entity (FromJSON, decoding straight from a raw Consul KV array element)" $ do
-    it "decodes a server (with its nested locations) and an upstream from their own KV entries" $ do
-      let serverBody = serverConfigJson & _Object . at "locations" ?~ object
-            [ "health"   .= healthJson
-            , "catchall" .= catchallJson
-            , "bar"      .= barJson
-            ]
-          rawEntries =
-            [ consulEntry "nginx/conf/servers/foo" serverBody
-            , consulEntry "nginx/conf/upstreams/backend" upstreamJson
-            ]
-      case parseEither parseJSON (toJSON rawEntries) :: Either String [Entity] of
-        Left err -> expectationFailure ("expected success, got: " <> err)
-        Right entities -> do
-          let (servers, upstreams) = partitionEntities entities
-          length servers `shouldBe` 1
-          length upstreams `shouldBe` 1
-          let rendered = toNginxConf (head servers)
-          rendered `shouldContainAll`
-            [ "server {"
-            , "listen 0.0.0.0:443 ssl;"
-            , "server_name foo;"
-            , "location /health {"
-            , "location ^~ / {"
-            , "location ^~ /bar {"
-            ]
-          toNginxConf (head upstreams) `shouldContainAll` [ "upstream backend {" ]
-
-    it "fails on an unrecognized key shape, even alongside an otherwise-valid entry" $ do
-      let rawEntries =
-            [ consulEntry "nginx/conf/servers/foo" serverConfigJson
-            , consulEntry "nginx/conf/servers/foo/bogus" (object [])
-            ]
-      case parseEither parseJSON (toJSON rawEntries) :: Either String [Entity] of
-        Left err -> err `shouldSatisfy` ("unrecognized key shape" `isInfixOf`)
-        Right _  -> expectationFailure "expected a failure for the unrecognized key shape"
-
-    it "fails on a server entry whose JSON body has no \"listen\" key" $ do
-      let rawEntries = [ consulEntry "nginx/conf/servers/orphan" (object [ "server_name" .= (["orphan"] :: [Text]) ]) ]
-      case parseEither parseJSON (toJSON rawEntries) :: Either String [Entity] of
-        Left err -> err `shouldSatisfy` ("key \"listen\" not found" `isInfixOf`)
-        Right _  -> expectationFailure "expected a failure for the missing \"listen\" key"
+      toNginxConf server `shouldContainAll` [ "break;" ]
 
 -- ===================== worked-example fixtures =====================
 -- These mirror servers/foo and upstreams/backend as this design expects
@@ -429,16 +314,15 @@ main = hspec $ do
 -- built here as aeson 'Value's rather than stringified JSON. All keys are
 -- snake_case, matching nginx's own documented directive/parameter names.
 
--- | "name" is required by Server's/Upstream's FromJSON instances
--- (Grouping.hs injects the real one from the KV key before parsing - see
--- there); Location has no "name" field at all, nothing ever reads one.
--- These fixtures need *a* value here even though every test overwrites it
--- via "set name ..." right after decoding; "unnamed" is a deliberately
--- obvious placeholder for that.
+-- | No "name" field here - these fixtures are the settings body only.
+-- Every test decodes them via 'decodeServerEntry'/'decodeUpstreamEntry',
+-- which take the name as their own separate argument, exactly like
+-- production gets it from the KV key rather than the JSON body (Location
+-- has no "name" field at all either way; nothing ever reads one - see
+-- Location's own doc comment in Types.hs).
 serverConfigJson :: Value
 serverConfigJson = object
-  [ "name" .= ("unnamed" :: Text)
-  , "server_name" .= (["foo"] :: [Text])
+  [ "server_name" .= (["foo"] :: [Text])
   , "listen" .= [ object [ "port" .= (443 :: Int), "ssl" .= True ] ]
   , "http2" .= True
   , "tls_cert_path" .= ("/var/lib/nginx-tls/backend.pem" :: Text)
@@ -449,8 +333,7 @@ serverConfigJson = object
 
 upstreamJson :: Value
 upstreamJson = object
-  [ "name" .= ("unnamed" :: Text)
-  , "resolver" .= object
+  [ "resolver" .= object
       [ "address" .= ("dns-server-1:8600" :: Text)
       , "valid" .= ("10s" :: Text)
       ]
@@ -519,12 +402,12 @@ directiveTokens prefix rendered =
     (line : _) -> T.words (T.dropEnd 1 line)
     []         -> []
 
--- | Builds one raw Consul KV array element - the exact shape 'Entity's own
--- FromJSON decodes directly, base64 round-trip included (unlike the
--- malformed-envelope fixtures above, which build their own "Value" text
--- by hand specifically to exercise that round-trip's failure modes).
-consulEntry :: Text -> Value -> Value
-consulEntry key body = object
-  [ "Key" .= key
-  , "Value" .= T.pack (LBS8.unpack (B64L.encode (encode body)))
-  ]
+-- | Builds a 'Server'/'Upstream' directly from a settings body and a
+-- chosen name, bypassing the Consul KV envelope (base64, "Key" parsing)
+-- entirely - that's Main.hs's "decodeKvEntry" own concern, not something
+-- these config-generation tests need to re-exercise.
+decodeServerEntry :: Text -> Value -> IO Server
+decodeServerEntry nm body = Named nm <$> (decodeOrFail body :: IO ServerConfig)
+
+decodeUpstreamEntry :: Text -> Value -> IO Upstream
+decodeUpstreamEntry nm body = Named nm <$> (decodeOrFail body :: IO UpstreamConfig)
