@@ -76,8 +76,6 @@ executable nginx-configurator
                     , containers
                     , directory
                     , filepath
-                    , http-conduit
-                    , http-types
                     , indexed-traversable
                     , optparse-applicative
                     , text

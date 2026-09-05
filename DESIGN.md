@@ -304,16 +304,22 @@ understood, and either side can be read on its own.
 ## Main.hs: fetch, decode, render
 
 - **One invocation mode**: `main` runs as the handler of a
-  `consul watch -type=keyprefix` on `--kv-prefix`, invoked by the Consul
-  agent itself - both for every KV change AND once immediately at agent
-  startup, since a blocking-query-based watch has no prior index to wait
-  on the first time it runs and so fires unconditionally as soon as it's
-  registered (this is what makes the old separate "pre-start
-  `ExecStartPre`" invocation unnecessary: `nginx.service` just orders
-  itself after the render this first, automatic firing produces - e.g. via
-  a systemd path unit gating on the "current" symlink a swap step
-  produces - rather than this program needing a second invocation mode of
-  its own).
+  `consul watch -type=keyprefix` on the servers/upstreams prefix - the
+  prefix lives in the watch definition, never as a flag of this program.
+  That watch can be either a standalone `consul watch ...` process or a
+  `"watches"` stanza in the agent's own config (e.g. `consul.json`) -
+  both are the same underlying Consul watch mechanism and spawn the
+  handler identically (a JSON array of KV entries, or `null` for zero
+  matches, piped to its stdin), so this program works unmodified under
+  either. Fires both for every KV change AND once immediately at
+  registration (agent startup, for the config-stanza form), since a
+  blocking-query-based watch has no prior index to wait on the first time
+  it runs and so fires unconditionally as soon as it's registered (this
+  is what makes a separate "pre-start `ExecStartPre`" invocation
+  unnecessary: `nginx.service` just orders itself after the render this
+  first, automatic firing produces - e.g. via a systemd path unit gating
+  on the "current" symlink a swap step produces - rather than this
+  program needing a second invocation mode of its own).
 
 - **One-shot, not long-running.** Consul's agent holds the persistent
   watch; it spawns this program fresh on every detected change (and once
@@ -321,40 +327,65 @@ understood, and either side can be read on its own.
   internal loop/poll/listen - `main` is just parse args -> get bytes ->
   decode -> one render -> exit.
 
-- **Getting the raw KV bytes and decoding them are decoupled - two
-  interchangeable "get bytes" functions converge on one decode function**:
-  - **`fetchBytesStdin :: IO (Either T.Text LBS.ByteString)`** - reads
-    stdin directly, the exact bytes Consul hands a `keyprefix` watch
-    handler (a JSON array of KV entries) with no HTTP round-trip. This is
-    what `main` currently wires up.
-  - **`fetchBytesHttp :: String -> T.Text -> IO (Either T.Text
-    LBS.ByteString)`** - the original approach, kept side by side rather
-    than removed: an authoritative `GET /v1/kv/<prefix>?recurse=true`
-    against Consul's own HTTP API, for if the stdin-trusting approach
-    ever turns out to be a problem (e.g. some future Consul version's
-    watch-handler delivery semantics turning out to be less than a
-    faithful, complete snapshot). A 404 (prefix not configured yet) is
-    normalized to the literal bytes `"[]"` here - the same bytes Consul
-    itself would return for an existing-but-empty prefix - so it's just
-    "zero entities" to whichever decode step runs next, not a special
-    case this function has to handle itself.
-  - **`decodeKvBatch :: LBS.ByteString -> Either T.Text ([Server],
-    [Upstream])`** - identical regardless of which fetch function
-    supplied the bytes. A `Left` means we couldn't make sense of the body
-    AT ALL (unparseable JSON, or some element failing `decodeKvEntry`),
-    and is deliberately NOT a crash (no `ioError`/uncaught exception).
-    `main` prints it to stderr and skips rendering entirely - it does NOT
-    fall through to "render zero servers", which would instead overwrite
-    the existing generation output with an empty one. Rationale for why a
-    crash is worse here than in most programs: as a watch handler, an
-    uncaught exception is not meaningfully different from a clean
-    non-zero exit (Consul just logs it and moves on, no automatic retry) -
-    but it IS worse than a clean, informative stderr message plus exit
-    code for whoever's tailing Consul's own logs.
-  - `main` picks one fetch function with a single line
-    (`bytesResult <- fetchBytesStdin`, `case bytesResult >>= decodeKvBatch
-    of ...`) - swapping to `fetchBytesHttp (argConsulAddr args)
-    (argKvPrefix args)` instead is a one-line change, not a rewrite.
+- **`main` reads stdin directly (`LBS.getContents`), no wrapper
+  function.** This is the exact bytes Consul hands a `keyprefix` watch
+  handler (a JSON array of KV entries, or the literal JSON value `null`
+  when nothing currently matches the watched prefix - see `decodeKvBatch`
+  below), no network fetch at all. Reading stdin can't itself fail the
+  way a network fetch can, so there's no `Either`-wrapping "fetch bytes"
+  function to speak of - just `body <- LBS.getContents` inline in `main`.
+  An earlier version of this program instead had a `fetchBytesStdin`/
+  `fetchBytesHttp` pair - the latter an authoritative
+  `GET /v1/kv/<prefix>?recurse=true` against Consul's own HTTP API, kept
+  side by side as a swappable alternative in case stdin-trusting turned
+  out to be a problem, both wrapped in `IO (Either T.Text LBS.ByteString)`
+  so either could be swapped in behind one call site. The HTTP path was
+  deliberately removed once the only remaining justification for it
+  - resilience against a missed watch invocation - turned out to be far
+  narrower than it first looked: a Consul agent *restart* doesn't lose
+  anything (it just re-registers the same watch, which fires again
+  immediately, see "One invocation mode" above); the only real gap is the
+  handler process itself dying mid-invocation (OOM-killed, crashes, a
+  disk-write failure) with no further KV write and no agent restart
+  afterward - narrow enough not to justify a second fetch path and the
+  `--consul-addr`/`--kv-prefix` CLI surface (and `http-conduit`/
+  `http-types` dependencies) it required. Once only the stdin path was
+  left, the `Either`-wrapping - which only ever existed to let a fallible
+  HTTP fetch and an infallible stdin read share one signature - had
+  nothing left to justify it either, so it went too.
+
+- **`decodeKvBatch :: LBS.ByteString -> Either T.Text ([Server],
+  [Upstream])`** - decodes the raw bytes read off stdin into every
+  `Server`/`Upstream` among them. Decodes as `Maybe [Value]`, not
+  `[Value]` outright: Consul's own `keyprefix` watch handler sends the
+  literal JSON value `null` (not an empty array) when nothing currently
+  matches the watched prefix - verified against a real running agent, and
+  initially missed, since it first surfaced as a bug (a legitimate "zero
+  entities" render was misreported as an unparseable-response failure).
+  `concat` on the resulting `Maybe [Value]` folds `Nothing` to `[]` and
+  `Just vs` to `vs` for free, since `Maybe` is already `Foldable`. A
+  `Left` means we couldn't make sense of the body AT ALL (unparseable
+  JSON, or some element failing `decodeKvEntry`), and is deliberately NOT
+  a crash (no `ioError`/uncaught exception). `main` prints it to stderr
+  and skips rendering entirely. Rationale for why a crash is worse here
+  than in most programs: as a watch handler, an uncaught exception is not
+  meaningfully different from a clean non-zero exit (Consul just logs it
+  and moves on, no automatic retry) - but it IS worse than a clean,
+  informative stderr message plus exit code for whoever's tailing
+  Consul's own logs.
+
+- **`main` separately refuses to render when `servers` comes back empty**,
+  even though that's a fully legitimate `decodeKvBatch` result (see
+  above - a `null`/zero-match payload is not a decode error). A server
+  block is what nginx actually listens on; an upstream on its own binds
+  nothing. Rendering a generation with zero servers - and letting a
+  symlink-swap script put it live - would mean nginx no longer listens on
+  any of its configured ports, which is a far worse failure mode than
+  just not producing a new generation at all. Zero *upstreams* alone is
+  fine and renders normally (a server may simply not proxy to one). This
+  check is intentionally separate from `decodeKvBatch`'s own `Left`/
+  `Right` distinction - it does NOT change what counts as a decode error,
+  it's a second, render-time guard on top of a successful decode.
 
 - **One file per server/upstream, not one shared file.**
   `renderGeneration` writes each server to its own `servers/<name>.conf`
@@ -398,7 +429,15 @@ implemented, and is left to whatever wraps this binary:
      a new symlink under a temp name, `rename()` it over `current` -
      POSIX guarantees that rename is atomic, so nginx never observes a
      half-swapped state).
-   - Run `nginx -t`.
+   - Run `nginx -t`. This is also the safety net for `tlsCertPath`
+     (`app/Types.hs`): nginx opens every `ssl_certificate`/
+     `ssl_certificate_key` path while building the SSL context, so a
+     missing or corrupt/mismatched cert-key pair at that fixed path (see
+     "TLS cert paths" below) fails the test with the path named in the
+     error, before anything reloads. It does NOT catch an expired cert
+     (no `notBefore`/`notAfter` check at load time - that's a client-side
+     TLS-handshake concern), a broken chain of trust, or a `server_name`/
+     SAN mismatch - those are outside `nginx -t`'s scope entirely.
    - On failure: repoint `current` back to the previous generation
      (untouched on disk) - nginx never reloaded, so live traffic was never
      affected.
@@ -413,17 +452,55 @@ implemented, and is left to whatever wraps this binary:
    the one still referenced by a `.bak`-equivalent rollback target.
 
 3. **A hard timeout around the whole invocation.** Today there's no
-   explicit timeout in this code - `httpLBS` is at the mercy of
-   `http-client`'s default manager settings, and there's no
+   explicit timeout in this code - `main`'s `LBS.getContents` on stdin
+   blocks until Consul closes the pipe, and there's no
    `System.Timeout.timeout` wrapping anything. As the watch handler, a
    hung invocation blocks that specific watch indefinitely (Consul doesn't
-   impose its own timeout on exec-style handlers); as the pre-start unit,
-   only systemd's own `TimeoutStartSec` eventually bounds it. Recommended
-   fix is at the invocation layer (`timeout 20s nginx-lb-render ...` in
-   both the watch's `args` and the systemd unit), not inside this program.
+   impose its own timeout on exec-style handlers). Recommended fix is at
+   the invocation layer (`timeout 20s` in the watch's own `args`), not
+   inside this program.
 
 4. **KV seeding/bootstrap** for the log-processor's existing routes - a
    manual, later step, not automated by anything here.
+
+## TLS cert paths
+
+Certs are generated/rotated by Vault Agent, entirely independently of
+this program - `tlsCertPath` (`app/Types.hs`) is just an opaque `Text`
+this program renders verbatim into `ssl_certificate`/
+`ssl_certificate_key`; it never generates, validates, or manages the
+file itself. Deliberately **not** timestamped the way `--conf-dir`'s own
+generations are:
+
+- Each cert lives at one **fixed** path (e.g. `$prefix/certs/<name>/
+  server.pem`), decided once when a server's KV entry is first written,
+  and never changes again. Vault Agent's own `template` stanza already
+  overwrites that fixed destination atomically (temp file + `rename()`)
+  on every renewal - the same atomicity guarantee a timestamped-
+  generation-plus-`current`-symlink scheme exists to provide, so adding
+  that scheme on top of Vault Agent's own atomic writes would be
+  redundant complexity, not an additional safety property.
+- This keeps the two systems fully decoupled: a pure cert rotation never
+  requires a new Consul KV write or a re-render through this program at
+  all - just `nginx -s reload` (nginx caches loaded certs at startup/
+  reload, so it needs that nudge to pick up new bytes at the same path,
+  even though the path itself never moved). That reload is Vault Agent's
+  own `exec` post-template hook's job, same idiom as this repo's other
+  confd/consul-template TLS rotation flows.
+- The trade-off accepted by *not* giving certs their own timestamped-
+  generation-plus-rollback scheme: no automatic revert if a renewed cert
+  turns out to be bad. `nginx -t` (see "What's deliberately NOT done
+  yet" above) does catch a missing or corrupt/mismatched file at that
+  fixed path, but not an expired-but-otherwise-valid one - that's on
+  Vault Agent's own renewal correctness and/or external monitoring, not
+  something either this program or the reload step surfaces.
+- If per-cert rollback ever becomes a real requirement, the fix is
+  `$prefix/certs/<name>/<timestamp>/` plus a `$prefix/certs/<name>/
+  current` symlink **per cert name**, rotated independently of every
+  other cert (unlike `--conf-dir`'s single shared timestamp, which has to
+  cover the whole server/upstream batch atomically - individual certs
+  have no equivalent "must all change together" constraint, so batching
+  them under one shared timestamp would only add unnecessary churn).
 
 ## Deferred ideas (discussed, explicitly not pursued now)
 
@@ -505,7 +582,7 @@ includes rendering edge cases like the CORS-preflight
 case. Worked-example fixtures use deliberately generic names
 (`foo`/`bar`/`backend`, `dns-server-1`) rather than the log-processor's
 real route names, to keep the tests self-explanatory independent of that
-history. `Main.hs`'s own IO layer (`fetchBytesStdin`/`fetchBytesHttp`,
+history. `Main.hs`'s own IO layer (`main`'s stdin read,
 `decodeKvEntry`'s KV-envelope decoding, `renderGeneration`'s filesystem
 writes) is NOT covered by `test/Spec.hs` at all - no tests exercise that
 behavior end-to-end today.
