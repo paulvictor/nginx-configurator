@@ -1,5 +1,5 @@
 {
-  description = "nginx-configurator, a Haskell package";
+  description = "nginx-configurator, a Haskell package, plus ngnix, a Nix module system for authoring its config";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -7,33 +7,42 @@
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
-        haskellPackages = pkgs.haskell.packages.ghc910;
+    let
+      pname = "nginx-configurator";
 
-        pname = "nginx-configurator";
-        src = pkgs.nix-gitignore.gitignoreSource [] ./.;
+      overlay = final: prev: {
+        ${pname} = final.haskell.packages.ghc910.callCabal2nix pname
+          (final.nix-gitignore.gitignoreSourcePure [ "dist-newstyle" ] ./nginx-configurator)
+          { };
+      };
+    in
+    flake-utils.lib.eachDefaultSystem
+      (system:
+        let
+          pkgs = import nixpkgs { inherit system; overlays = [ overlay ]; };
+          haskellPackages = pkgs.haskell.packages.ghc910;
 
-        package = haskellPackages.callCabal2nix pname src {};
-      in
-      {
-        packages.${pname} = package;
-        packages.default = package;
+          package = pkgs.${pname};
+        in
+        {
+          packages.${pname} = package;
+          packages.default = package;
 
-        apps.${pname} = flake-utils.lib.mkApp { drv = package; };
-        apps.default = self.apps.${system}.${pname};
+          apps.${pname} = flake-utils.lib.mkApp { drv = package; };
+          apps.default = self.apps.${system}.${pname};
 
-        devShells.default = haskellPackages.shellFor {
-          packages = _: [ package ];
-          withHoogle = true;
+          devShells.default = haskellPackages.shellFor {
+            packages = _: [ package ];
+            withHoogle = true;
 
-          nativeBuildInputs = with haskellPackages; [
-            cabal-install
-            ghcid
-          ];
-        };
+            nativeBuildInputs = with haskellPackages; [
+              cabal-install
+              ghcid
+            ];
+          };
 
-        formatter = pkgs.nixpkgs-fmt;
-      });
+          formatter = pkgs.nixpkgs-fmt;
+        }) // {
+      overlays.${pname} = overlay;
+    };
 }

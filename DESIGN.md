@@ -1,6 +1,8 @@
-# nginx-lb-render: design notes
+# nginx-configurator + ngnix: design notes
 
-## Context
+## Part 1: app/ - the Haskell nginx-config renderer (nginx-lb-render)
+
+### Context
 
 nginx was originally a static, log-processor-specific proxy: one hardcoded
 `virtualHosts.alb` with the log-processor's routes baked into Nix
@@ -16,7 +18,7 @@ This program (the "renderer") deliberately does only one job: fetch +
 decode + write files. It never runs `nginx -t`, never reloads nginx, and
 never swaps any symlink - see "What's deliberately NOT done yet" below.
 
-## KV layout
+### KV layout
 
 `servers` and `upstreams` are two separate, flat, top-level KV entities -
 one complete JSON value per key, no further nesting into separate KV
@@ -76,7 +78,7 @@ camelCase - this avoids a translation layer and means a directive nginx
 supports that isn't explicitly modeled here often doesn't need a code
 change at all (see "raw KeyMap params" below).
 
-## Types.hs and NginxConf.hs: parsing and rendering
+### Types.hs and NginxConf.hs: parsing and rendering
 
 `Types.hs` owns parsing - data declarations, `FromJSON` instances, and the
 lenses (`makeFieldsNoPrefix`/`makeLenses`) generated for them. `NginxConf.hs`
@@ -123,8 +125,8 @@ understood, and either side can be read on its own.
   `Types.hs`: it used to have to live in a shared module, since Cabal
   requires every `main-is` file (both the executable's `Main.hs` and the
   test-suite's `Spec.hs`) to declare `module Main`, and a component can
-  only have one `Main`, so `app/Main.hs`'s content can never be added to
-  the test-suite's `other-modules`. Now that `test/Spec.hs` builds its
+  only have one `Main`, so `nginx-configurator/app/Main.hs`'s content can never be added to
+  the test-suite's `other-modules`. Now that `nginx-configurator/test/Spec.hs` builds its
   `Server`/`Upstream` fixtures directly (see "Testing" below) instead of
   routing them through `decodeKvEntry`, that constraint no longer applies,
   and `decodeKvEntry` moved to sit next to its only remaining callers,
@@ -301,7 +303,7 @@ understood, and either side can be read on its own.
   earlier attempt at strict unknown-field rejection was reverted because
   parsing should not fail just because a KV blob has stray fields.
 
-## Main.hs: fetch, decode, render
+### Main.hs: fetch, decode, render
 
 - **One invocation mode**: `main` runs as the handler of a
   `consul watch -type=keyprefix` on the servers/upstreams prefix - the
@@ -414,7 +416,7 @@ understood, and either side can be read on its own.
   decoding/assembly, the "rendered N server(s) to ..." confirmation, the
   `Left` fetch-failure message) goes to stderr instead.
 
-## What's deliberately NOT done yet
+### What's deliberately NOT done yet
 
 This program stops at "write the new generation directory and print its
 path" - on purpose, matching the confd `check_cmd`/`reload_cmd` and
@@ -430,7 +432,7 @@ implemented, and is left to whatever wraps this binary:
      POSIX guarantees that rename is atomic, so nginx never observes a
      half-swapped state).
    - Run `nginx -t`. This is also the safety net for `tlsCertPath`
-     (`app/Types.hs`): nginx opens every `ssl_certificate`/
+     (`nginx-configurator/app/Types.hs`): nginx opens every `ssl_certificate`/
      `ssl_certificate_key` path while building the SSL context, so a
      missing or corrupt/mismatched cert-key pair at that fixed path (see
      "TLS cert paths" below) fails the test with the path named in the
@@ -463,10 +465,10 @@ implemented, and is left to whatever wraps this binary:
 4. **KV seeding/bootstrap** for the log-processor's existing routes - a
    manual, later step, not automated by anything here.
 
-## TLS cert paths
+### TLS cert paths
 
 Certs are generated/rotated by Vault Agent, entirely independently of
-this program - `tlsCertPath` (`app/Types.hs`) is just an opaque `Text`
+this program - `tlsCertPath` (`nginx-configurator/app/Types.hs`) is just an opaque `Text`
 this program renders verbatim into `ssl_certificate`/
 `ssl_certificate_key`; it never generates, validates, or manages the
 file itself. Deliberately **not** timestamped the way `--conf-dir`'s own
@@ -502,7 +504,7 @@ generations are:
   have no equivalent "must all change together" constraint, so batching
   them under one shared timestamp would only add unnecessary churn).
 
-## Deferred ideas (discussed, explicitly not pursued now)
+### Deferred ideas (discussed, explicitly not pursued now)
 
 - **Eliminating the old fold-based grouping via per-entity files -
   partially superseded, see below.** The original thought experiment:
@@ -548,9 +550,9 @@ generations are:
   baked in regardless, which is the same "each piece needs to know which
   server it belongs to" problem grouping already solves.
 
-## Testing
+### Testing
 
-`test/Spec.hs` is a proper cabal `test-suite` (`cabal test`, or `nix
+`nginx-configurator/test/Spec.hs` is a proper cabal `test-suite` (`cabal test`, or `nix
 build`/`nix flake check`, which runs it as part of the package's checkPhase)
 - not a standalone `nix-shell`-shebang script. There's no separate library
 component: the test suite just recompiles `Types`/`NginxConf` alongside
@@ -575,7 +577,7 @@ Coverage is deliberately scoped to **nginx config generation** - decode
 failure modes (missing fields, invalid base64, unrecognized KV key
 shapes, and so on) are not tested at all; aeson's own parser already
 fails loudly on invalid JSON, and `decodeKvEntry` itself lives in
-`Main.hs` now, entirely outside what `test/Spec.hs` touches. Coverage
+`Main.hs` now, entirely outside what `nginx-configurator/test/Spec.hs` touches. Coverage
 includes rendering edge cases like the CORS-preflight
 `ConditionalResponse` example, `ProxyParameters`' typed `next_upstream`/
 `set_header` handling, and the "nothing rendered when `proxy` is unset"
@@ -584,5 +586,318 @@ case. Worked-example fixtures use deliberately generic names
 real route names, to keep the tests self-explanatory independent of that
 history. `Main.hs`'s own IO layer (`main`'s stdin read,
 `decodeKvEntry`'s KV-envelope decoding, `renderGeneration`'s filesystem
-writes) is NOT covered by `test/Spec.hs` at all - no tests exercise that
+writes) is NOT covered by `nginx-configurator/test/Spec.hs` at all - no tests exercise that
 behavior end-to-end today.
+
+## Part 2: nix/ - the ngnix Nix module system
+
+A Nix module system mirroring every data type in `nginx-configurator/app/Types.hs` as
+NixOS-style options (`lib.mkOption`/`types.submodule`), so a server's/
+upstream's config can be authored via Nix's own module-merge semantics
+and evaluated straight into the JSON `nginx-configurator/app/Types.hs`'s `FromJSON`
+instances expect. The actual entrypoint - evaluating this schema,
+generating the JSON, and running the real `nginx-configurator` binary
+against it as a build output - lives in `nix/ngnix.nix`, not alongside
+the schema files under `nix/modules/`; see that file's own doc comment
+and the `nix/ngnix.nix` note further below for what it does.
+Terraform/terranix (actually pushing into Consul KV) is still not
+implemented anywhere in this repo.
+
+These notes exist so the `.nix` files themselves can stay pure code -
+this file is where the "why," not just the "what," lives.
+
+### Governing conventions
+
+- **Option names are the JSON keys `Types.hs` actually reads (`o .:
+  "snake_case_key"`), not the Haskell field names.** These frequently
+  differ - e.g. `AccessRule`'s Haskell field is `_direction` but its
+  `FromJSON` reads `o .: "type"`; `ProxyParameters`'s Haskell field
+  `_nextUpstream` reads `"proxy_next_upstream"`.
+- **Defaults mirror `Types.hs`'s own decode-time defaults exactly**
+  (`.!= def`/`.!= True`/etc.), so a Nix value that omits a field reads
+  the same as a decoded Haskell value would - e.g. `access_log` defaults
+  to `true` (NOT `false`, the way most other bools here do - `Location`'s
+  `FromJSON` explicitly writes `.!= True`), `match` defaults to
+  `"prefix"`, `UpstreamServer.parameters` defaults to `{weight=1;
+  resolve=false; max_fails=3; fail_timeout="10s"; backup=false;}` (the
+  real nginx-matching defaults `defaultUpstreamServerParams` merges in;
+  `slow_start` intentionally has no default entry, same as `Types.hs` -
+  nginx's own default is "disabled", which is exactly what "absent" means
+  there).
+- **Every per-type file is a first-class module**: a bare module body
+  (`{ lib, ... }: { options = {...}; }`, optionally with `freeformType`
+  alongside `options`) rather than a pre-built `lib.types.submodule
+  {...}` value. Callers wrap at the point of use (e.g. `lib.types.submodule
+  ./resolver.nix`, or `lib.types.submodule common.accessRule` for the one
+  shared type living in `common.nix`). This means every file is also
+  independently evaluable/documentable via a plain `imports = [
+  ./resolver.nix ]` in its own right, not just nestable - the whole point
+  being to enable per-module doc generation. `servers.nix`/`upstreams.nix`
+  are the only files with real top-level `options`/`config` in the
+  traditional NixOS sense (nothing ever "wraps" them further, since
+  they're the actual schema root). `ServerConfig`/`UpstreamConfig`
+  themselves are the one deliberate exception to "every per-type file is
+  a first-class module": rather than their own files, they're defined as
+  anonymous, locally-scoped submodules directly inside `servers.nix`'s/
+  `upstreams.nix`'s own `attrsOf (submodule {...})` - since "servers" IS
+  just an attrset of `ServerConfig`s (ditto upstreams), there's no
+  standalone reuse case for either type outside that one attrsOf, unlike
+  `Resolver`/`Location`/etc., which genuinely get nested in more than one
+  place.
+- **Two genuinely different "extra JSON keys" shapes exist - do not
+  conflate them:**
+  - `Resolver`/`ProxyParameters` FLATTEN unknown keys directly onto their
+    own object (Haskell: `KM.delete "address" o` for `Resolver`, e.g.
+    `{"address":"127.0.0.1:53","valid":"5s","ipv6":"on"}` - no wrapper
+    key at all). Modeled via each submodule's own `freeformType`, not a
+    nested option.
+  - `UpstreamServer` NESTS extra keys under a real `"parameters"` key
+    (Haskell: `o .:? "parameters" .!= KM.empty`, e.g. `{"address":"...",
+    "parameters":{"weight":2}}`). Modeled as a normal nested option whose
+    type is an attrs-of-scalars, NOT a `freeformType`.
+  - `ProxyParameters` additionally pulls two keys - `proxy_next_upstream`
+    (a list of tokens) and `proxy_set_header` (a name->value map) - out
+    of its own flat/freeform bucket into their own typed options, since
+    nginx's syntax for each doesn't fit the generic "key value;" shape
+    everything else renders as.
+  - The Haskell parser accepts a `ProxyParameters` raw key with or
+    without the `"proxy_"` prefix (auto-added if missing) - that's parser
+    leniency for whoever hand-writes KV JSON directly. Since this module
+    system is now the one *generating* canonical data, always use the
+    fully-prefixed key here (e.g. `proxy_http_version`) - no need to
+    replicate that parsing leniency on the authoring side.
+- **The one real sum type - `RewriteModuleDirective`** (`Return`/
+  `Rewrite`/`Break`, discriminated by a `"type"` string) - has no native
+  Nix equivalent. Modeled as three submodules (each with a fixed,
+  single-valued enum for `type`, so serialization always has something to
+  discriminate on), combined via `types.oneOf`. `MatchType`/`RewriteFlag`/
+  `AccessDirection` are plain nullary enums with no per-constructor data,
+  so they're just `types.enum [...]` wherever they're used, not
+  discriminated unions.
+- **Small, genuinely-shared types live in `common.nix`; single-use small
+  types are inlined at their one use site.** A "small" type here means an
+  enum or an `AccessRule`-sized ~2-field record with no freeform/
+  defaulting complexity (unlike `Resolver`/`UpstreamServer`/
+  `ProxyParameters`, which stay their own files despite being small in
+  field count, because of that complexity). Applying this:
+  - `MatchType` (enum) - used only by `Location.match` - inlined in
+    `location.nix`.
+  - `RewriteFlag` (enum) - used only inside `RewriteModuleDirective`'s
+    `Rewrite` constructor - inlined in `rewrite_module_directive.nix`.
+  - `AccessDirection` (enum) - used only inside `AccessRule`'s own `type`
+    field - inlined directly inside `common.nix`'s own `accessRule`.
+  - `AccessRule` (2 fields) - used by both `Location.access_rules` and
+    `ServerConfig.access_rules` - genuinely shared - lives in
+    `common.nix`.
+  - `Listen` (3 fields: `port`/`ssl`/`ipv6`, no nested/freeform
+    complexity) - used only by `ServerConfig.listen` - inlined directly
+    in `servers.nix` rather than its own file. The one borderline call (3
+    fields, not literally "2"), made on the same single-use-vs-shared
+    axis as everything else, since it has no freeform/defaulting
+    complexity that would otherwise justify its own file.
+- **`Named a` (`Types.hs`) has no file of its own.** Its whole point - a
+  server's/upstream's name always comes from the Consul KV key, never a
+  JSON field - is realized structurally in `servers.nix`/`upstreams.nix`:
+  `options.servers`/`options.upstreams` are `attrsOf (submodule
+  ...)`, where the attrset key IS the name and each value is exactly a
+  `ServerConfig`/`UpstreamConfig` body with no name field of its own -
+  not a missed type, this is the intended mirror of `Named`.
+
+### Per-file notes
+
+**`common.nix`** - the genuinely shared-across-2+-files small type
+(`accessRule`, per the rule above). A plain `{ lib }: { ... }` attrset
+(not itself a module), imported explicitly wherever needed. The
+`(Text,Text)` pair shape used for `extra_headers`/`extra_directives`
+(wherever nginx allows a header/directive name to repeat) used to live
+here too as a custom `headerPair` submodule, but is now just
+`lib.types.attrListOf lib.types.str` at each use site instead - a real
+nixpkgs type built for exactly this "ordered, same-key-can-repeat" shape
+(list format `[{a=1;} {b=2;}]` preserves order and allows repeats;
+attrset format `{a=1; b=2;}` is terser but comes back key-sorted, not
+source-order, and can't express a repeated key at all - use list format
+when either matters). No custom type was needed once this was found.
+
+**`helpers.nix`** - plain utility functions (not types), same
+plain-attrset, explicitly-imported shape as `common.nix` - kept as a
+separate file so it's obvious at a glance which shared file holds types
+vs. plain functions, and so more helpers can be added later without
+growing `common.nix`'s own scope. Currently just `pairListToArray`:
+`attrListOf` evaluates to `[{a=1;} ...]` (a list of single-key attrsets),
+but `Types.hs` decodes each pair from a raw 2-element array instead
+(`["a", 1]`), so `pairListToArray` flattens one into the other; every
+`extra_headers`/`extra_directives` option (`location.nix`, `servers.nix`
+×2) wires it in directly via `apply = helpers.pairListToArray;`, so the
+option itself always reports the wire shape - see the "Why `apply`, not
+a `config` section" note further below for why. Note: extending `lib`
+itself (e.g. `lib' = lib // { pairListToArray = ...; }; lib'.evalModules
+{...}`) does NOT work for this - `lib.evalModules`'s own signature is
+closed (no `...`, doesn't accept a `lib` argument at all) and is
+hardcoded to inject nixpkgs' own internal `lib` into every module's
+`{ lib, ... }`, regardless of which alias you call `evalModules` through;
+confirmed by testing it directly (`attribute 'myHelper' missing`). A
+plain explicitly-imported file is the only mechanism that actually
+works here, same as `common.nix`.
+
+**`resolver.nix`** - mirrors `Resolver`. Freeform for everything except
+the required, positional `address`.
+
+**`upstream_server.nix`** - mirrors `UpstreamServer`. Nested `parameters`
+option (not freeform - see the flatten-vs-nested note above), defaulting
+to nginx's own real defaults.
+
+**`proxy_parameters.nix`** - mirrors `ProxyParameters`. Freeform plus the
+two pulled-out typed options (`proxy_next_upstream`, `proxy_set_header`).
+
+**`rewrite_module_directive.nix`** - mirrors `RewriteModuleDirective`.
+Still one file (not split into three, unlike the first-class-module-per-
+file treatment everywhere else) - a discriminated union has no single
+`{ options = ...; }` body of its own to expose, so unlike every other
+per-type file here, this one keeps returning an already-built type value
+(`lib.types.oneOf [...]`), and callers keep consuming it via a manual
+`import ./rewrite_module_directive.nix { inherit lib; }` rather than
+`lib.types.submodule ./rewrite_module_directive.nix`. `return`/`rewrite`/
+`break` are still each their own distinct submodule type, defined right
+there.
+
+**`conditional_response.nix`** - mirrors `ConditionalResponse`, a
+narrowly-scoped model of nginx's `if` directive inside a location -
+covering exactly the one common, well-understood safe pattern (reply to
+a specific condition, e.g. a CORS preflight, with some headers and a
+status code). Its own `extra_headers` is deliberately NOT the same list
+as `Location`'s own `extra_headers`, and the two are not
+interchangeable:
+- `Location.extra_headers` applies to every response from that location,
+  INCLUDING the one generated by this conditional - `add_header` is
+  inherited into an empty `if` block from the enclosing location (per
+  nginx's own docs: inherited if and only if the current level defines
+  none of its own), so shared headers (e.g. CORS ones) belong there, set
+  once.
+- This `extra_headers` is only for headers that must NOT appear on the
+  location's normal (non-matching) response - e.g. `Content-Length`/
+  `Content-Type` on a synthetic `return 200` for an OPTIONS preflight,
+  which would be actively wrong applied to the real proxied response.
+
+**`location.nix`** - mirrors `Location`. No "name" field - unlike
+`Server`'s/`Upstream`'s own KV-key-derived name, nothing ever reads a
+`Location`'s name on the Haskell side: it's not rendered (the real,
+user-visible identity of a location is its `path`), and locations don't
+get written to their own output file the way servers/upstreams do.
+`proxy_pass` is *authored* as `scheme`/`upstream` (rather than one opaque
+`"http://backend"` string, the shape `Types.hs`'s own `ServerConfig`
+field actually decodes) so `upstream` is at least structured enough to
+validate later. Cross-checking that `upstream` is actually a key in the
+top-level `upstreams` attrset would need `upstreams` and `servers`
+evaluated together (so it can't be a type-level constraint here) - there
+used to be an "assertions" check for exactly that, dropped for now (some
+workarounds needed to get it right), so this is currently unvalidated;
+revisit later. The option's own `apply = v: if v == null then null else
+"${v.scheme}://${v.upstream}";` recombines it back into the single
+string `Types.hs` actually expects, so `config.proxy_pass` itself is
+already wire-ready - see the "Why `apply`, not a `config` section" note
+further below for why this lives on the option, not as a separate
+transform step.
+
+**`servers.nix`** - the schema root for `servers`, mirroring this
+project's Consul KV layout (see "Part 1"'s "KV layout" section above).
+`ServerConfig` (mirroring `Types.hs`'s type of the same name)
+is defined as a locally-scoped, anonymous submodule directly inside this
+file's own `options.servers = mkOption { type = attrsOf (submodule
+{...}); }` - not its own file, since "servers" IS just an attrset of
+`ServerConfig`s, with no standalone reuse case for the type outside that
+one attrsOf (see the "first-class module" exception noted above). Same
+"name comes from `Named`, not a field here" reasoning as `Upstream`/
+`upstreams.nix` below. Upstreams are a separate top-level KV entity
+(nginx's own `upstream {}` is an http-scope construct referenced by name
+from anywhere, not owned by one server), so there's no upstreams field
+here at all. `extra_directives` reuses the same `attrListOf str` pair
+shape as `extra_headers` even though these are directive/value pairs,
+not headers - same wire shape either way, and the same "nginx allows a
+directive to repeat" reasoning (e.g. several `error_page` lines) applies.
+No cross-field validation currently (see `location.nix`'s note on
+`proxy_pass.upstream` above).
+
+**`upstreams.nix`** - the schema root for `upstreams`, same shape as
+`servers.nix`: `UpstreamConfig` is a locally-scoped, anonymous submodule
+inside this file's own `options.upstreams`, for the same "just an
+attrset of one type, no standalone reuse case" reason. `Upstream` itself
+is `Named UpstreamConfig` - its name comes from `Named` (realized via
+this file's own `attrsOf`), not a field here.
+
+**`nix/ngnix.nix`** (not alongside the schema files under `nix/modules/`
+- see the section below) is the actual entrypoint now; there is no
+`eval.nix` in `nix/modules/`. `evaluated.config` (from `lib.evalModules { modules = [
+./servers.nix ./upstreams.nix ] ++ modules; }`) is already directly
+convertible to JSON, with no separate post-processing step needed,
+because every field that needs a different authored-vs-wire shape
+(`extra_headers`/`extra_directives`, `proxy_pass`) handles that itself
+via `apply` on its own `mkOption` (see `helpers.nix`'s `pairListToArray`
+note and `location.nix`'s `proxy_pass` note above).
+
+**Why `apply`, not a `config` section, for these transforms**: a
+module's `config` block can't define an option in terms of that *same*
+option's own merged value (`config.foo = f(config.foo);` is circular -
+`config.foo`'s final value already depends on evaluating every module's
+`config.foo` definition, including this one). `mkOption`'s `apply`
+exists for exactly this "author one shape, report a different shape"
+case instead: it post-processes the type-checked, merged value *before*
+it's exposed as `config.foo` to anything, and its return value doesn't
+need to match the option's own declared `type`. Doc generation is
+unaffected either way, since docs are built from the option's declared
+`type`/`description`/`default` (the authoring shape), not from `apply`'s
+output.
+
+### `nix/ngnix.nix`
+
+The real entrypoint (needs `pkgs`, not just `lib`, so it doesn't belong
+alongside the pure schema files under `nix/modules/`). `import
+./nix/ngnix.nix` (named "ngnix" as a portmanteau of nginx + Nix) is a
+plain attrset of three **independent functions** - `ast`, `configFile`,
+`generated` - each taking the exact same argument shape, `{ pkgs, lib ?
+pkgs.lib, modules ? [ ], specialArgs ? { } }`, and each usable entirely
+on its own. This is deliberate: a caller who just wants the evaluated
+config or the JSON (e.g. to export into Consul via Terraform/terranix
+later) can call `ast`/`configFile` directly with a plain `pkgs` - neither
+needs `pkgs.nginx-configurator` at all - while a caller who wants an
+actual rendered-nginx-config build output calls `generated` instead
+(which does need the overlay, since it's the one that actually runs the
+binary). `modules`/`specialArgs` are threaded through to the underlying
+`lib.evalModules` call the same way `imports`/`specialArgs` always work,
+so a downstream user's own modules can depend on `specialArgs` values
+same as any NixOS module can.
+
+`ngnix.nix` itself has no Haskell-specific logic at all - `generated`
+just assumes whatever `pkgs` it's given already has
+`pkgs.nginx-configurator` (via the flake's own overlay,
+`overlays.nginx-configurator` in `flake.nix` at the repo root, which builds it
+from `nginx-configurator/` - the Haskell package's own subdirectory,
+kept separate from this `nix/` module system so the repo root stays to
+just `flake.nix`/`nix/`/`nginx-configurator/` and top-level docs).
+
+- `ast { pkgs, lib ? pkgs.lib, modules ? [ ], specialArgs ? { } }` -
+  `(lib.evalModules { modules = [ ./modules/servers.nix
+  ./modules/upstreams.nix ] ++ modules; inherit specialArgs; }).config`
+  (`servers`/`upstreams`, already wire-ready per the `apply` note above) -
+  directly `builtins.toJSON`-able.
+- `configFile args` - `(pkgs.formats.json {}).generate "config.json" (ast
+  args)`, a real store path containing that same JSON.
+- `generated args` - a `pkgs.runCommand` derivation that actually runs
+  `pkgs.nginx-configurator` against `configFile args`, producing real
+  rendered `server {}`/`upstream {}` `.conf` files as its build output
+  (`$out/<timestamp>/{servers,upstreams}/*.conf`). Getting from `ast`'s
+  friendly `{servers;upstreams;}` shape to the raw Consul-KV-batch shape
+  `nginx-configurator` actually reads on stdin (`[{"Key":...,"Value":
+  <base64>}, ...]`) is one `jq` transform piped directly into the binary
+  (`jq`'s own `@base64` string filter handles the base64-encoding, no
+  separate `base64` binary call or intermediate file needed) - not
+  reimplemented in Nix itself. Timestamps inside a Nix sandbox aren't
+  meaningful wall-clock time, so the generation subdirectory's name is
+  exactly as arbitrary as that implies - accepted, since this is a build
+  output for inspection/testing, not a live deployment artifact.
+  `nginx-configurator`'s own "servers must be non-empty" guard (see "Part
+  1"'s app/ documentation) means a `generated` build with zero servers
+  configured fails the build outright (bash's own default pipeline exit
+  status - the last command's, i.e. `nginx-configurator`'s - propagates
+  the failure through the `jq | nginx-configurator` pipe correctly), same
+  as
+  it would fail at runtime.
