@@ -24,12 +24,11 @@ let
       modules =
         modules ++
         [
-          ./modules/servers.nix
-          ./modules/upstreams.nix
+          ./modules/mixin.nix
           { _module.args = { inherit pkgs; }; }
         ];
       inherit specialArgs;
-    }).config;
+    }).config.ngnix.settings;
 
   configFile = args@{ pkgs, ... }:
     (pkgs.formats.json { }).generate "config.json" (ast args);

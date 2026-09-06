@@ -826,13 +826,26 @@ this file's own `attrsOf`), not a field here.
 
 **`nix/ngnix.nix`** (not alongside the schema files under `nix/modules/`
 - see the section below) is the actual entrypoint now; there is no
-`eval.nix` in `nix/modules/`. `evaluated.config` (from `lib.evalModules { modules = [
-./servers.nix ./upstreams.nix ] ++ modules; }`) is already directly
-convertible to JSON, with no separate post-processing step needed,
-because every field that needs a different authored-vs-wire shape
+`eval.nix` in `nix/modules/`. `evaluated.config.ngnix.settings` (from
+`lib.evalModules { modules = [ ./mixin.nix ] ++ modules; }`) is already
+directly convertible to JSON, with no separate post-processing step
+needed, because every field that needs a different authored-vs-wire shape
 (`extra_headers`/`extra_directives`, `proxy_pass`) handles that itself
 via `apply` on its own `mkOption` (see `helpers.nix`'s `pairListToArray`
 note and `location.nix`'s `proxy_pass` note above).
+
+**`mixin.nix`** - wraps `servers.nix`/`upstreams.nix` under one
+`options.ngnix.settings` (`type = submoduleWith { modules = [ ./servers.nix
+./upstreams.nix ]; }`), so the exact same two schema files are usable two
+ways without any edits to either: bare (as `ast` used to import them
+directly) or namespaced under `ngnix.settings`, safe to `imports` into a
+module tree this repo doesn't own (e.g. a terranix configuration) without
+risking a collision with whatever else that tree declares. `nix/ngnix.nix`'s
+`ast` now goes through this file too (not `servers.nix`/`upstreams.nix`
+directly), so there's exactly one authoring convention regardless of
+whether the config is headed for `ast`/`configFile`/`generated` or mixed
+into someone else's tree - see the `ast` bullet below. Exported at the
+flake level as `flake.lib.ngnixModule` (`flake-parts/ngnix.nix`).
 
 **Why `apply`, not a `config` section, for these transforms**: a
 module's `config` block can't define an option in terms of that *same*
@@ -875,10 +888,16 @@ kept separate from this `nix/` module system so the repo root stays to
 just `flake.nix`/`nix/`/`nginx-configurator/` and top-level docs).
 
 - `ast { pkgs, lib ? pkgs.lib, modules ? [ ], specialArgs ? { } }` -
-  `(lib.evalModules { modules = [ ./modules/servers.nix
-  ./modules/upstreams.nix ] ++ modules; inherit specialArgs; }).config`
-  (`servers`/`upstreams`, already wire-ready per the `apply` note above) -
-  directly `builtins.toJSON`-able.
+  `(lib.evalModules { modules = [ ./modules/mixin.nix ] ++ modules;
+  inherit specialArgs; }).config.ngnix.settings` (`servers`/`upstreams`,
+  already wire-ready per the `apply` note above) - directly
+  `builtins.toJSON`-able. Goes through `mixin.nix` (see its own note below)
+  rather than importing `servers.nix`/`upstreams.nix` directly, so a
+  caller's own `modules` are authored the same way regardless of whether
+  they're feeding `ast` or mixing into someone else's module tree -
+  `modules = [{ ngnix.settings.servers.foo = {...}; }]`, not bare
+  `{ servers.foo = {...}; }`. `ast` itself just unwraps the `ngnix.settings`
+  namespace on the way out, so `configFile`/`generated` below never see it.
 - `configFile args` - `(pkgs.formats.json {}).generate "config.json" (ast
   args)`, a real store path containing that same JSON.
 - `generated args` - a `pkgs.runCommand` derivation that actually runs

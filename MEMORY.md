@@ -122,6 +122,30 @@ this file is just the "what was decided," not the "why" in full.
   to be - accepted, since this is for inspection/testing, not a live
   deployment artifact.
 
+## Deferred ideas (not implemented yet, revisit later)
+
+- Validate rendered nginx config as a Nix build-time check, before it ever
+  reaches Consul/production - would catch "nginx-configurator emitted an
+  invalid config" bugs at build/CI time instead of only discovering them
+  when a real nginx tries to reload. Two complementary tools:
+  - `nginx -t` - catches syntax/directive-context errors, but needs a
+    *complete* wrapper `http {}` config that `include`s every rendered
+    `server`/`upstream` fragment (so cross-references like `proxy_pass`
+    resolve), and it actually opens `ssl_certificate`/`ssl_certificate_key`
+    files - needs either a dummy self-signed cert substituted at the
+    configured path, or those two directives stripped/rewritten, for the
+    validation pass specifically.
+  - `gixy` (confirmed packaged in nixpkgs as `pkgs.gixy`) - pure
+    static/AST analysis of the config text, no certs or upstream
+    resolution needed at all, so it sidesteps the cert problem entirely.
+    Catches a different class of issues (alias traversal, SSRF-prone
+    `proxy_pass` with variables, missing `resolver`, header-inheritance
+    footguns).
+  - Proposed shape: a new function alongside `ast`/`configFile`/
+    `generated` in `nix/ngnix.nix` (e.g. `checked`) that builds the
+    rendered output, assembles the wrapper config, and fails the Nix
+    build if either tool fails.
+
 ## Things explicitly tried and rejected
 
 - HTTP-fetch fallback in `Main.hs` (`fetchBytesHttp`) - removed; the
