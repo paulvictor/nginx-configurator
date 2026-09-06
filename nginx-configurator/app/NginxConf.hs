@@ -103,11 +103,11 @@ instance NginxConf RewriteModuleDirective where
   toNginxConf (Rewrite rgx repl f) =
     "rewrite " <> rgx <> " " <> repl <> maybe "" ((" " <>) . rewriteFlagText) f <> ";"
     where
-      rewriteFlagText RewriteLast      = "last"
-      rewriteFlagText RewriteBreakFlag = "break"
-      rewriteFlagText RewriteRedirect  = "redirect"
-      rewriteFlagText RewritePermanent = "permanent"
-  toNginxConf Break = "break;"
+      rewriteFlagText Last      = "last"
+      rewriteFlagText Break     = "break"
+      rewriteFlagText Redirect  = "redirect"
+      rewriteFlagText Permanent = "permanent"
+  toNginxConf BreakDirective = "break;"
 
 instance NginxConf AccessRule where
   toNginxConf r = accessDirectionText (r ^. direction) <> " " <> r ^. value <> ";"
@@ -137,13 +137,14 @@ instance NginxConf Location where
     <> [ "    access_log off;" | not (l ^. accessLog) ]
     <> ((\f -> "    include " <> f <> ";") <$> l ^. extraIncludes)
     <> (renderHeader "    " <$> l ^. extraHeaders)
+    <> [ "    " <> k <> " " <> v <> ";" | (k, v) <- l ^. extraDirectives ]
     <> [ "  }" ]
     where
-      matchModifier MatchExact       = "= "
-      matchModifier MatchPrefixExact = "^~ "
-      matchModifier MatchPrefix      = ""
-      matchModifier MatchRegex       = "~ "
-      matchModifier MatchRegexCI     = "~* "
+      matchModifier Exact       = "= "
+      matchModifier PrefixExact = "^~ "
+      matchModifier Prefix      = ""
+      matchModifier Regex       = "~ "
+      matchModifier RegexCI     = "~* "
 
 -- ===================== Server =====================
 

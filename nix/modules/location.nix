@@ -101,5 +101,20 @@ in
       default = [ ];
       description = "allow/deny, in order.";
     };
+
+    extra_directives = mkOption {
+      type = attrListOf str;
+      default = [ ];
+      apply = helpers.pairListToArray;
+      description = ''
+        Catch-all for any other ngx_http_core_module location-context
+        directive not explicitly modeled above, rendered verbatim as "key
+        value;". An ordered attribute list (list format: [{"error_page" =
+        "404 /404.html";} ...], not the attrset format), so a directive
+        nginx allows multiple times in one location block can appear more
+        than once here too - same shape as ServerConfig's own
+        extra_directives.
+      '';
+    };
   };
 }

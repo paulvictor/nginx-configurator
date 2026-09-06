@@ -18,25 +18,12 @@ import qualified Data.Aeson.Key as Key
 import Data.Aeson.KeyMap (KeyMap)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser)
+import Data.Char (toLower)
 import Data.Default.Class (Default (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 
--- ===================== Named =====================
-
--- | A server's/upstream's own name always comes from the same place - the
--- Consul KV key - never from anywhere else in the JSON body. Both
--- 'Server' and 'Upstream' are just 'Named' specialized over their own
--- settings type ('ServerConfig'/'UpstreamConfig' respectively, see those
--- sections below) rather than each hand-rolling an identical "name ::
--- Text" field, so 'HasName'/'HasConfig' (from 'makeFieldsNoPrefix' below)
--- are shared across both. No 'FromJSON' instance of its own: 'Named'
--- values are only ever built directly - by Main.hs's `decodeKvEntry`,
--- which already knows the name from the KV key it just classified and
--- doesn't need to re-derive it from a "name" field in the JSON body at
--- all, or, in tests, by wrapping a decoded 'ServerConfig'/'UpstreamConfig'
--- with a name of the test's choosing.
 data Named a = Named
   { _name   :: Text
   , _config :: a
@@ -44,14 +31,6 @@ data Named a = Named
 
 makeFieldsNoPrefix ''Named
 
--- ===================== shared key/value parameter helpers =====================
-
--- | A parameter whose value is a plain scalar (Bool/Number/String) -
--- shared by UpstreamServer's "server" parameters and Resolver's, which
--- have the exact same shape: "key=value", or a bare keyword when the
--- value is true. Proxy's own parameters allow richer shapes
--- (Array/Object) and so validate/render separately (checkRawProxyParam
--- below / renderProxyBlock in NginxConf.hs).
 checkIsRawValue :: Key -> Value -> Parser ()
 checkIsRawValue k v =
   if has (_Bool.united `failing` _Number.united `failing` _String.united) v
@@ -116,10 +95,6 @@ data ProxyParameters = ProxyParameters
   , _setHeader    :: KeyMap Text   -- proxy_set_header's name->value pairs
   } deriving (Show, Generic)
 
--- | Unlike every other type in this module, none of these three fields is
--- shared with another type (no "HasRawParams"/etc. needed elsewhere), so
--- plain "makeLenses" (bare field names, no type-name prefix to strip) is
--- used here instead of "makeFields".
 makeLenses ''ProxyParameters
 
 instance Default ProxyParameters where
@@ -207,10 +182,6 @@ instance FromJSON UpstreamServer where
         , ("max_fails", Number 3)
         , ("fail_timeout", "10s")
         , ("backup", Bool False)
-        -- "slow_start" intentionally has no entry: nginx's own default is
-        -- "disabled", which is exactly what "absent from this map" means. nginx
-        -- also rejects "slow_start" together with "backup" on the same server -
-        -- not enforced here, caught by "nginx -t" like any other config error.
         ]
 
 -- | `resolver` joins the same `HasResolver` class Location's/
@@ -230,36 +201,17 @@ data UpstreamConfig = UpstreamConfig
 makeFieldsNoPrefix ''UpstreamConfig
 
 instance FromJSON UpstreamConfig where
-  parseJSON = withObject "UpstreamConfig" $ \o -> UpstreamConfig
-    <$> o .:? "resolver"
-    <*> o .:  "servers"
-    <*> o .:? "keepalive"
-    <*> o .:? "keepalive_requests"
-    <*> o .:? "keepalive_timeout"
-    <*> o .:? "zone_size"
+  parseJSON = genericParseJSON defaultOptions { fieldLabelModifier = camelTo2 '_' . drop 1 }
 
-
--- | The KV entity itself - see 'Named'\'s own doc comment for why its
--- name lives outside 'UpstreamConfig'. Rendering (NginxConf instance)
--- lives in NginxConf.hs, not here.
 type Upstream = Named UpstreamConfig
 
 -- ===================== Location =====================
 
-data MatchType = MatchExact | MatchPrefixExact | MatchPrefix | MatchRegex | MatchRegexCI
+data MatchType = Exact | PrefixExact | Prefix | Regex | RegexCI
   deriving (Show, Eq, Generic)
 
-instance Default MatchType where
-  def = MatchPrefix
-
 instance FromJSON MatchType where
-  parseJSON = withText "MatchType" $ \case
-    "exact"        -> pure MatchExact         -- "="
-    "prefix_exact" -> pure MatchPrefixExact   -- "^~"  (stop regex search, like today's routes)
-    "prefix"       -> pure MatchPrefix        -- no modifier
-    "regex"        -> pure MatchRegex         -- "~"
-    "regex_ci"     -> pure MatchRegexCI       -- "~*"
-    other          -> fail $ "unknown matchType: " <> T.unpack other
+  parseJSON = genericParseJSON defaultOptions { constructorTagModifier = camelTo2 '_' }
 
 -- | The three ngx_http_rewrite_module directives valid in server, location,
 -- AND if contexts - and per nginx's own docs, the only ones "100% safe"
@@ -270,30 +222,30 @@ instance FromJSON MatchType where
 --   rewrite ^(/download/.*)/media/(.*)\..*$ $1/mp3/$2.mp3 last;
 --   rewrite ^(/download/.*)/audio/(.*)\..*$ $1/mp3/$2.ra  last;
 --   return  403;
--- Constructor names (Return/Rewrite/Break) don't clash with anything:
--- data constructors and lowercase functions are different namespaces, so
--- "Return" doesn't shadow Prelude's "return" the way a field named bare
--- "return" would have (see ConditionalResponse's old "returnCode", now
--- gone - this replaces it, and Location's old "locReturn"/"LocationReturn"
--- too, both fully subsumed by a single-element list here).
-data RewriteFlag = RewriteLast | RewriteBreakFlag | RewriteRedirect | RewritePermanent
+-- Constructor names (Return/Rewrite/BreakDirective) don't clash with
+-- anything: data constructors and lowercase functions are different
+-- namespaces, so "Return" doesn't shadow Prelude's "return" the way a
+-- field named bare "return" would have (see ConditionalResponse's old
+-- "returnCode", now gone - this replaces it, and Location's old
+-- "locReturn"/"LocationReturn" too, both fully subsumed by a
+-- single-element list here). RewriteModuleDirective's own nullary
+-- constructor is "BreakDirective" rather than "Break" so it doesn't
+-- clash with RewriteFlag's "Break" just below - two different nginx
+-- concepts (the standalone `break;` directive vs. the `rewrite ...
+-- break;` flag) that happen to share the same word.
+data RewriteFlag = Last | Break | Redirect | Permanent
   deriving (Show, Eq, Generic)
 
 instance FromJSON RewriteFlag where
-  parseJSON = withText "RewriteFlag" $ \case
-    "last"      -> pure RewriteLast
-    "break"     -> pure RewriteBreakFlag
-    "redirect"  -> pure RewriteRedirect
-    "permanent" -> pure RewritePermanent
-    other       -> fail $ "unknown rewrite flag: " <> T.unpack other
+  parseJSON = genericParseJSON defaultOptions { constructorTagModifier = map toLower }
 
 -- | `code`/`value` only exist on `Return`, and `regex`/`replacement`/`flag`
 -- only on `Rewrite` - `makeFieldsNoPrefix` still works across constructors
 -- like this, it just generates a `Traversal'` instead of a `Lens'` for a
 -- field that isn't present in every constructor (e.g. `value` here is a
--- `Traversal'`, not a `Lens'`, since `Break` has neither `code` nor
--- `value`). `value` is also shared with AccessRule's field of the same
--- name below.
+-- `Traversal'`, not a `Lens'`, since `BreakDirective` has neither `code`
+-- nor `value`). `value` is also shared with AccessRule's field of the
+-- same name below.
 data RewriteModuleDirective
   = Return { _code :: Int, _value :: Maybe Text }
     -- e.g. {"type":"return","code":403} or
@@ -302,20 +254,21 @@ data RewriteModuleDirective
     -- explicitly as code=302 instead, one less Maybe to thread through.
   | Rewrite { _regex :: Text, _replacement :: Text, _flag :: Maybe RewriteFlag }
     -- e.g. {"type":"rewrite","regex":"^/old/(.*)","replacement":"/new/$1","flag":"last"}
-  | Break
+  | BreakDirective
     -- {"type":"break"}
   deriving (Show, Generic)
 
 makeFieldsNoPrefix ''RewriteModuleDirective
 
 instance FromJSON RewriteModuleDirective where
-  parseJSON = withObject "RewriteModuleDirective" $ \o -> do
-    ty <- o .: "type"
-    case (ty :: Text) of
-      "return"  -> Return <$> o .: "code" <*> o .:? "value"
-      "rewrite" -> Rewrite <$> o .: "regex" <*> o .: "replacement" <*> o .:? "flag"
-      "break"   -> pure Break
-      other     -> fail ("unknown RewriteModuleDirective \"type\": " <> T.unpack other)
+  parseJSON = genericParseJSON defaultOptions
+    { sumEncoding = TaggedObject { tagFieldName = "type", contentsFieldName = "contents" }
+    , constructorTagModifier = tag
+    , fieldLabelModifier = drop 1
+    }
+    where
+      tag "BreakDirective" = "break"
+      tag other            = map toLower other
 
 -- | ngx_http_access_module's "allow"/"deny" directives - valid in http,
 -- server, and location (http-level stays out of scope, same as
@@ -330,10 +283,7 @@ data AccessDirection = Allow | Deny
   deriving (Show, Eq, Generic)
 
 instance FromJSON AccessDirection where
-  parseJSON = withText "AccessDirection" $ \case
-    "allow" -> pure Allow
-    "deny"  -> pure Deny
-    other   -> fail $ "unknown AccessDirection: " <> T.unpack other
+  parseJSON = genericParseJSON defaultOptions { constructorTagModifier = map toLower }
 
 data AccessRule = AccessRule
   { _direction :: AccessDirection
@@ -424,6 +374,11 @@ data Location = Location
                                                        -- ConditionalResponse's own doc comment
   , _accessRules          :: [AccessRule]              -- allow/deny, in order. Shared with
                                                        -- ServerConfig's field of the same name.
+  , _extraDirectives      :: [(Text, Text)]           -- catch-all for any other
+                                                       -- ngx_http_core_module location-context
+                                                       -- directive not explicitly modeled above.
+                                                       -- Shared with ServerConfig's field of the
+                                                       -- same name; see its own doc comment.
   } deriving (Show, Generic)
 
 makeFieldsNoPrefix ''Location
@@ -431,7 +386,7 @@ makeFieldsNoPrefix ''Location
 instance FromJSON Location where
   parseJSON = withObject "Location" $ \o -> Location
     <$> o .:  "path"
-    <*> o .:? "match" .!= def
+    <*> o .:? "match" .!= Prefix
     <*> o .:? "proxy_pass"
     <*> parseOptionalProxy o
     <*> o .:? "rewrite_directives" .!= def
@@ -441,6 +396,7 @@ instance FromJSON Location where
     <*> o .:? "resolver"
     <*> o .:? "conditional_responses" .!= def
     <*> o .:? "access_rules" .!= def
+    <*> o .:? "extra_directives" .!= def
 
 -- ===================== Server =====================
 
@@ -530,8 +486,4 @@ instance FromJSON ServerConfig where
       <*> o .:? "extra_directives" .!= def
       <*> o .:? "locations" .!= def
 
--- | The KV entity itself - see 'Named'\'s own doc comment for why its
--- name lives outside 'ServerConfig'. Rendering (NginxConf instance) lives
--- in NginxConf.hs, and decoding one from a raw Consul KV entry
--- (`decodeKvEntry`) lives in Main.hs, not here.
 type Server = Named ServerConfig
