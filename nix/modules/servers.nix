@@ -77,8 +77,9 @@ in
         };
 
         rewrite_directives = mkOption {
-          type = listOf rewriteModuleDirective;
+          type = listOf rewriteModuleDirective.type;
           default = [ ];
+          apply = map rewriteModuleDirective.toWireShape;
           description = "return/rewrite/break, in order, at the server level.";
         };
 

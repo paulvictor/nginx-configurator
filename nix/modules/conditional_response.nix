@@ -18,8 +18,9 @@ in
     };
 
     rewrite_directives = mkOption {
-      type = listOf rewriteModuleDirective;
+      type = listOf rewriteModuleDirective.type;
       default = [ ];
+      apply = map rewriteModuleDirective.toWireShape;
       description = ''
         Ordered - e.g. a single "return". nginx evaluates multiple such
         directives in the same context in the order they're written.
