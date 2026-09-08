@@ -28,7 +28,7 @@
       # directly into `apps.<name>`, not an actual `{type;program;}` app
       # value), confirmed by reading the actual tagged source. Use
       # `nix run .#apply` / `.#init` / `.#destroy` explicitly instead.
-      perSystem = { config, system, ... }: {
+      perSystem = { config, system, pkgs, ... }: {
         # Overlaying `terraform` itself (rather than adding a separately
         # named package) means every internal reference to `pkgs.terraform`
         # - including terranix's own `result.terraformWrapper` default,
@@ -40,12 +40,20 @@
         # internals without needing to touch anything there directly.
         _module.args.pkgs = import inputs.nixpkgs {
           inherit system;
+          config.allowUnfree = true; # terraform itself is BSL-licensed
           overlays = [
+            nginx-configurator.overlays.nginx-configurator
             (final: prev: {
               terraform = prev.terraform.withPlugins (p: [ p.hashicorp_consul ]);
             })
           ];
         };
+
+        # Our own devShells.default below merges in result.devShell via
+        # inputsFrom, so terranix's own auto-generated one (which would
+        # otherwise conflict outright - two definitions of the same
+        # option) is turned off here.
+        terranix.setDevShell = false;
 
         terranix.terranixConfigurations.default.modules = [
           nginx-configurator.lib.ngnixModule
@@ -57,6 +65,21 @@
         # terraform at all.
         packages.terraform-config =
           config.terranix.terranixConfigurations.default.result.terraformConfiguration;
+
+        # terranix.flakeModule already generates its own devShells.default
+        # for a configuration named "default" (giving apply/init/destroy/
+        # terraform on PATH) - inputsFrom merges it with what's needed to
+        # test the rest of this repo's own pipeline locally, rather than
+        # replacing it (which would conflict outright).
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ config.terranix.terranixConfigurations.default.result.devShell ];
+          packages = [
+            pkgs.nginx-configurator # render/test a KV batch locally, e.g. `jq ... | nginx-configurator --conf-dir /tmp/out`
+            pkgs.consul # for `consul agent -dev` + `consul kv put` local testing
+            pkgs.nginx
+            pkgs.jq
+          ];
+        };
       };
     };
 }
