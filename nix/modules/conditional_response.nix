@@ -2,6 +2,7 @@
 with lib;
 with types;
 let
+  helpers = import ./helpers.nix { inherit lib; };
   rewriteModuleDirective = import ./rewrite_module_directive.nix { inherit lib; };
 in
 {
@@ -14,6 +15,7 @@ in
     extra_headers = mkOption {
       type = attrListOf str;
       default = [ ];
+      apply = helpers.pairListToArray;
       description = "Branch-only add_header pairs - see the note above.";
     };
 

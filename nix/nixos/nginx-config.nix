@@ -74,6 +74,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Owned by "consul" (writes generations/current), readable by nginx's
+    # own group (reads them) - setgid so nested content this creates
+    # inherits the nginx group too, not consul's own primary group.
+    systemd.tmpfiles.rules = [
+      "d ${cfg.confDir} 02750 consul ${config.services.nginx.group} -"
+    ];
+
     # Changing this file doesn't restart Consul on its own.
     services.consul.extraConfigFiles = [ (toString watchSpecFile) ];
 
