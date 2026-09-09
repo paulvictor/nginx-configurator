@@ -55,7 +55,7 @@
 
       api = {
         server_name = [ "api.example.com" ];
-        listen = [{ port = 8080; ipv6 = true; }];
+        listen = [{ port = 8080; }];
         locations = [
           {
             path = "^/v[0-9]+/.*";
