@@ -85,12 +85,6 @@ in
       description = "Extra add_header name/value pairs (e.g. CORS).";
     };
 
-    resolver = mkOption {
-      type = nullOr (submodule ./resolver.nix);
-      default = null;
-      description = "Valid here too (ngx_http_core_module).";
-    };
-
     conditional_responses = mkOption {
       type = listOf (submodule ./conditional_response.nix);
       default = [ ];

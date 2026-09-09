@@ -60,12 +60,6 @@ in
           description = "Extra add_header name/value pairs, site-wide.";
         };
 
-        resolver = mkOption {
-          type = nullOr (submodule ./resolver.nix);
-          default = null;
-          description = "Valid here too (ngx_http_core_module).";
-        };
-
         proxy = mkOption {
           type = submodule ./proxy_parameters.nix;
           default = { };

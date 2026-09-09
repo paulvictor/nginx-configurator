@@ -21,7 +21,6 @@
         ];
         http2 = true;
         extra_headers = [{ "X-Frame-Options" = "DENY"; }];
-        resolver.address = "10.0.0.2:53";
         proxy = {
           proxy_next_upstream = [ "error" "timeout" ];
           proxy_set_header.Host = "$host";
@@ -78,7 +77,6 @@
           {
             path = "/";
             proxy_pass = { upstream = "app-3"; };
-            resolver.address = "10.0.0.2:53";
           }
         ];
       };
@@ -103,13 +101,19 @@
               })
               (lib.range 0 (backendCount - 1));
           in
-          { servers = backends; }
-          // lib.optionalAttrs (lib.mod i 5 == 0) { resolver.address = "10.0.0.2:53"; }
+          {
+            servers = backends;
+            # Every backend above sets resolve = true (this demo models
+            # Consul-DNS-style service routing, never static IPs) - resolver
+            # and zone_size are both required by nginx whenever any backend
+            # does, so unlike keepalive below, these aren't conditional.
+            resolver.address = "10.0.0.2:53";
+            zone_size = "2m";
+          }
           // lib.optionalAttrs (lib.mod i 3 == 0) {
             keepalive = 32;
             keepalive_requests = 100;
             keepalive_timeout = "60s";
-            zone_size = "2m";
           };
       })
       (lib.range 0 29));

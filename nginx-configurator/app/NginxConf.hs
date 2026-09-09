@@ -132,7 +132,6 @@ instance NginxConf Location where
          , indentLines "    " (renderProxyBlock (l ^. proxy))
          ]
        ) (l ^. proxyPass)
-    <> maybe [] (\r -> [ "    " <> toNginxConf r ]) (l ^. resolver)
     <> (("    " <>) . toNginxConf <$> l ^. rewriteDirectives)
     <> [ "    access_log off;" | not (l ^. accessLog) ]
     <> ((\f -> "    include " <> f <> ";") <$> l ^. extraIncludes)
@@ -161,7 +160,6 @@ instance NginxConf (Named ServerConfig) where
                         , "  ssl_certificate_key " <> c <> ";" ]) (cfg ^. tlsCertPath)
     <> (renderHeader "  " <$> cfg ^. extraHeaders)
     <> (("  " <>) . toNginxConf <$> cfg ^. accessRules)
-    <> maybe [] (\r -> [ "  " <> toNginxConf r ]) (cfg ^. resolver)
     <> [ indentLines "  " (renderProxyBlock (cfg ^. proxy)) ]
     <> (("  " <>) . toNginxConf <$> cfg ^. rewriteDirectives)
     <> [ "  " <> k <> " " <> v <> ";" | (k, v) <- cfg ^. extraDirectives ]

@@ -39,6 +39,14 @@ with types;
       };
     });
     default = { };
+    apply = mapAttrs (name: cfg:
+      if cfg.resolver == null && any (s: s.parameters.resolve or false) cfg.servers
+      then
+        lib.warn
+          "ngnix.settings.upstreams.${name} has a backend with parameters.resolve = true but no resolver set - nginx -t will reject this generation"
+          cfg
+      else cfg
+    );
     description = ''
       Consul KV upstreams/$name entries, same name-as-key convention as
       servers.

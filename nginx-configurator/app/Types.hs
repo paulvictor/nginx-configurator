@@ -335,8 +335,7 @@ instance FromJSON ConditionalResponse where
     <*> o .:? "extra_headers" .!= def
     <*> o .:? "rewrite_directives" .!= def
 
--- | Bare field names + `makeFieldsNoPrefix`: `resolver` joins
--- UpstreamConfig's/ServerConfig's class, `proxy`/`rewriteDirectives`/
+-- | Bare field names + `makeFieldsNoPrefix`: `proxy`/`rewriteDirectives`/
 -- `extraHeaders`/`accessRules` join ServerConfig's (and
 -- `rewriteDirectives`/`extraHeaders` also unify with
 -- ConditionalResponse's own fields the same way) - again, the derived
@@ -367,9 +366,6 @@ data Location = Location
   , _extraHeaders         :: [(Text, Text)]           -- extra add_header name/value pairs (e.g. CORS).
                                                        -- Shared with ServerConfig's field of the same
                                                        -- name below.
-  , _resolver             :: Maybe Resolver            -- valid here too (ngx_http_core_module).
-                                                       -- Shared with UpstreamConfig's/ServerConfig's
-                                                       -- field of the same name.
   , _conditionalResponses :: [ConditionalResponse]    -- e.g. CORS preflight handling; see
                                                        -- ConditionalResponse's own doc comment
   , _accessRules          :: [AccessRule]              -- allow/deny, in order. Shared with
@@ -393,7 +389,6 @@ instance FromJSON Location where
     <*> o .:? "access_log" .!= True
     <*> o .:? "extra_includes" .!= def
     <*> o .:? "extra_headers" .!= def
-    <*> o .:? "resolver"
     <*> o .:? "conditional_responses" .!= def
     <*> o .:? "access_rules" .!= def
     <*> o .:? "extra_directives" .!= def
@@ -414,10 +409,10 @@ instance FromJSON Listen where
     <*> o .:? "ssl"  .!= def
     <*> o .:? "ipv6" .!= def
 
--- | Bare field names + `makeFieldsNoPrefix`: `resolver`/`proxy`/
--- `extraHeaders`/`rewriteDirectives`/`accessRules` all join the classes
--- Location (and, for the latter two, ConditionalResponse) already
--- established; `locations` is unique to ServerConfig. A server's own
+-- | Bare field names + `makeFieldsNoPrefix`: `proxy`/`extraHeaders`/
+-- `rewriteDirectives`/`accessRules` all join the classes Location (and,
+-- for the latter two, ConditionalResponse) already established;
+-- `locations` is unique to ServerConfig. A server's own
 -- settings and its child locations live in one type, not split further -
 -- the KV wire format is flat (one JSON object per server, "locations"
 -- alongside its other fields, see DESIGN.md's KV layout section), and
@@ -440,8 +435,6 @@ data ServerConfig = ServerConfig
   , _tlsCertPath      :: Maybe Text    -- same file used for cert + key
   , _extraHeaders     :: [(Text, Text)]  -- extra add_header name/value pairs, site-wide. Shared
                                        -- with Location's field of the same name above.
-  , _resolver         :: Maybe Resolver  -- valid here too (ngx_http_core_module). Shared
-                                       -- with Upstream's/Location's field of the same name.
   , _proxy            :: ProxyParameters -- site-wide proxy_http_version/proxy_set_header/
                                        -- proxy_next_upstream*, inherited by every location
                                        -- unless a location sets its own. Shared with Location's
@@ -479,7 +472,6 @@ instance FromJSON ServerConfig where
       <*> o .:? "http2" .!= def
       <*> o .:? "tls_cert_path"
       <*> o .:? "extra_headers" .!= def
-      <*> o .:? "resolver"
       <*> parseOptionalProxy o
       <*> o .:? "rewrite_directives" .!= def
       <*> o .:? "access_rules" .!= def

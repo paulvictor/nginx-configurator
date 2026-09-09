@@ -173,25 +173,6 @@ main = hspec $ do
         , "add_header Access-Control-Allow-Methods \"GET, POST\" always;"
         ]
 
-    it "renders a location-level resolver (ngx_http_core_module allows this context)" $ do
-      l <- decodeOrFail
-             (object
-               [ "path" .= ("/dynamic" :: Text)
-               , "proxy_pass" .= ("http://backend" :: Text)
-               , "resolver" .= object
-                   [ "address" .= ("127.0.0.1:53" :: Text)
-                   , "valid" .= ("5s" :: Text)
-                   , "ipv6" .= ("on" :: Text)
-                   ]
-               ])
-             :: IO Location
-      let rendered = toNginxConf l
-      rendered `shouldContainAll` [ "location /dynamic {" ]
-      -- parameters render as an unordered map, so check the token set rather
-      -- than one fixed-order string
-      directiveTokens "resolver 127.0.0.1:53" rendered
-        `shouldMatchList` [ "resolver", "127.0.0.1:53", "valid=5s", "ipv6=on" ]
-
   describe "Server" $ do
     it "renders the full foo server block from its parsed parts" $ do
       server <- decodeServerEntry "foo"
@@ -218,15 +199,6 @@ main = hspec $ do
                  , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
                  ])
       toNginxConf server `shouldContainAll` [ "server_name foo www.foo *.foo.example;" ]
-
-    it "renders a server-level resolver (ngx_http_core_module allows this context)" $ do
-      server <- decodeServerEntry "foo"
-               (object
-                 [ "server_name" .= (["foo"] :: [Text])
-                 , "listen" .= [ object [ "port" .= (443 :: Int) ] ]
-                 , "resolver" .= object [ "address" .= ("10.0.0.2:53" :: Text) ]
-                 ])
-      toNginxConf server `shouldContainAll` [ "resolver 10.0.0.2:53;" ]
 
     it "renders extra_directives verbatim, including a directive given more than once" $ do
       server <- decodeServerEntry "foo"
