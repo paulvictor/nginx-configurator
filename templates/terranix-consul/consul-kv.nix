@@ -17,11 +17,9 @@
       web = {
         server_name = [ "www.example.com" "example.com" ];
         listen = [
-          { port = 443; ssl = true; }
           { port = 80; }
         ];
         http2 = true;
-        tls_cert_path = "/etc/ssl/private/example.com.pem";
         extra_headers = [{ "X-Frame-Options" = "DENY"; }];
         resolver.address = "10.0.0.2:53";
         proxy = {
@@ -58,14 +56,12 @@
 
       api = {
         server_name = [ "api.example.com" ];
-        listen = [{ port = 443; ssl = true; ipv6 = true; }];
-        tls_cert_path = "/etc/ssl/private/api.example.com.pem";
+        listen = [{ port = 8080; ipv6 = true; }];
         locations = [
           {
             path = "^/v[0-9]+/.*";
             match = "regex";
             proxy_pass = { upstream = "app-2"; };
-            extra_includes = [ "/etc/nginx/snippets/api-cors.conf" ];
           }
           { path = "/internal"; match = "regex_ci"; rewrite_directives = [{ break = { }; }]; }
         ];
@@ -73,8 +69,7 @@
 
       admin = {
         server_name = [ "admin.internal" ];
-        listen = [{ port = 8443; ssl = true; }];
-        tls_cert_path = "/etc/ssl/private/admin.internal.pem";
+        listen = [{ port = 8443; }];
         access_rules = [
           { type = "allow"; value = "10.1.0.0/16"; }
           { type = "deny"; value = "all"; }

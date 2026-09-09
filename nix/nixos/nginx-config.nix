@@ -25,6 +25,10 @@ let
     name = "nginx-config-watch";
     runtimeInputs = [ cfg.package config.services.nginx.package pkgs.coreutils pkgs.systemd ];
     text = ''
+      # Consul only logs watch handler output at debug level, unreliably -
+      # send our own stderr straight to the journal instead.
+      exec 2> >(exec systemd-cat -t nginx-config-watch)
+
       # Consul pipes the keyprefix watch payload to stdin, passed straight through.
       if ! new_gen="$(nginx-configurator --conf-dir "${cfg.confDir}")"; then
         echo "nginx-config-watch: nginx-configurator failed (decode error or no servers) - not touching current" >&2
@@ -44,6 +48,7 @@ let
   };
 
   watchSpecFile = (pkgs.formats.json { }).generate "nginx-config-watch.json" {
+    log_level = "debug";
     watches = [{
       type = "keyprefix";
       prefix = cfg.keyPrefix;
