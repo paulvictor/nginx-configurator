@@ -9,10 +9,12 @@ let
 
   # Symlinked as `.main` inside each generation directory so its relative
   # includes resolve correctly with no per-invocation templating needed.
+  # No "pid" directive here - it's passed per-invocation via "-g", pointed
+  # at the generation directory itself (see watchScript below), since a
+  # fixed /tmp path collides across separate invocations/users.
   nginxTestConfTemplate = pkgs.writeText "nginx-config-watch-test.conf" ''
     # nginx-config-watch's own test harness - not the real production config.
     events {}
-    pid /tmp/nginx-config-watch-test.pid;
     error_log /dev/null;
     http {
       access_log off;
@@ -37,7 +39,7 @@ let
 
       # Test the new generation directly, before `current` is touched.
       ln -sf "${nginxTestConfTemplate}" "$new_gen/.main"
-      if ! nginx -t -c "$new_gen/.main"; then
+      if ! nginx -t -c "$new_gen/.main" -g "pid $new_gen/.nginx-test.pid;"; then
         echo "nginx-config-watch: nginx -t failed against new generation $new_gen - not swapping current" >&2
         exit 1
       fi
