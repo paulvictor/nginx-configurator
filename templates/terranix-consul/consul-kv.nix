@@ -120,22 +120,27 @@
   };
 
   # Adjust to your actual Consul cluster/ACL setup.
-  terraform.required_providers.consul.source = "hashicorp/consul";
+  terraform.required_providers.consul = {
+    source  = "hashicorp/consul";
+    version = "2.23.0";
+  };
   provider.consul.address = "127.0.0.1:8500";
 
   # consul_keys (rather than consul_key_prefix) manages only the exact
   # keys listed here - no prefix-wide pruning, so a renamed/removed server
-  # or upstream leaves its old key behind in Consul unless removed by hand
-  # (or via that key's own `delete = true`). The opposite tradeoff from
+  # or upstream would otherwise leave its old key behind in Consul; each
+  # entry's own `delete = true` below has Terraform actually remove it
+  # from Consul instead, whenever that entry disappears from the list (or
+  # the whole resource is destroyed). The opposite tradeoff from
   # consul_key_prefix: no "prefix must start empty" restriction, so this
   # can coexist with an already-populated "nginx/conf/" tree with no
   # one-time `terraform import` needed first.
   resource.consul_keys.nginx.key =
     (lib.mapAttrsToList
-      (name: cfg: { path = "nginx/conf/servers/${name}"; value = builtins.toJSON cfg; })
+      (name: cfg: { path = "nginx/conf/servers/${name}"; value = builtins.toJSON cfg; delete = true; })
       config.ngnix.settings.servers)
     ++
     (lib.mapAttrsToList
-      (name: cfg: { path = "nginx/conf/upstreams/${name}"; value = builtins.toJSON cfg; })
+      (name: cfg: { path = "nginx/conf/upstreams/${name}"; value = builtins.toJSON cfg; delete = true; })
       config.ngnix.settings.upstreams);
 }
