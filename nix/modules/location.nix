@@ -32,21 +32,18 @@ in
           upstream = mkOption {
             type = str;
             description = ''
-              The upstream name to proxy to - intended to be a key
-              present in the top-level "upstreams" attrset, currently
-              unvalidated.
+              The upstream name to proxy to - a key present in the
+              top-level "upstreams" attrset.
             '';
           };
         };
       });
       default = null;
-      apply = v: if v == null then null else "${v.scheme}://${v.upstream}";
       description = ''
-        nginx's own "proxy_pass" target, e.g. scheme="http",
-        upstream="backend" for "proxy_pass http://backend;". Reported as
-        the single "scheme://upstream" string Types.hs actually expects
-        (via "apply") - author scheme/upstream separately, read back one
-        string.
+        nginx's own "proxy_pass" directive takes one bare string (e.g.
+        "proxy_pass http://backend;") - Types.hs deliberately deviates
+        from that and keeps "scheme"/"upstream" as separate fields all
+        the way through; NginxConf composes the literal directive text.
       '';
     };
 

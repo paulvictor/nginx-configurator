@@ -346,14 +346,28 @@ instance FromJSON ConditionalResponse where
 -- (the real, user-visible identity of a location is its `path`), and
 -- locations don't get written to their own output file the way
 -- servers/upstreams do, so there's nothing downstream to pass it to.
+-- | nginx's own "proxy_pass" directive takes one bare string argument
+-- (e.g. "proxy_pass http://backend;") - this KV schema deliberately
+-- deviates from that and splits it into "scheme"/"upstream" fields
+-- instead, so "upstream" stays a structured, independently-checkable
+-- name rather than a substring of an opaque URL. NginxConf's own render
+-- recomposes the two into the literal directive text nginx expects.
+data ProxyPass = ProxyPass
+  { _scheme   :: Text  -- "http" or "https"
+  , _upstream :: Text  -- a key in the top-level "upstreams" attrset
+  } deriving (Show, Generic)
+
+makeFieldsNoPrefix ''ProxyPass
+
+instance FromJSON ProxyPass where
+  parseJSON = withObject "ProxyPass" $ \o -> ProxyPass
+    <$> o .:? "scheme" .!= "http"
+    <*> o .:  "upstream"
+
 data Location = Location
   { _path                 :: Text                     -- real nginx path, e.g. "/foo/bar"
   , _match                :: MatchType
-  , _proxyPass            :: Maybe Text               -- nginx's own full "proxy_pass" target,
-                                                       -- scheme included (e.g. "http://backend" or
-                                                       -- "https://backend") - not hardcoded to a
-                                                       -- scheme here, so a KV entry can point at an
-                                                       -- https upstream just as easily.
+  , _proxyPass            :: Maybe ProxyPass
   , _proxy                :: ProxyParameters          -- proxy_http_version/proxy_set_header/
                                                        -- proxy_next_upstream* - only rendered when
                                                        -- proxy_pass is set. Shared with ServerConfig's

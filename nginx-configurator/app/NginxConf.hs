@@ -127,8 +127,8 @@ instance NginxConf Location where
     [ "  location " <> matchModifier (l ^. match) <> l ^. path <> " {" ]
     <> (("    " <>) . toNginxConf <$> l ^. accessRules)
     <> (indentLines "    " . toNginxConf <$> l ^. conditionalResponses)
-    <> maybe [] (\p ->
-         [ "    proxy_pass " <> p <> ";"
+    <> maybe [] (\pp ->
+         [ "    proxy_pass " <> pp ^. scheme <> "://" <> pp ^. upstream <> ";"
          , indentLines "    " (renderProxyBlock (l ^. proxy))
          ]
        ) (l ^. proxyPass)

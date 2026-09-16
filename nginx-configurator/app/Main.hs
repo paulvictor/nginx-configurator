@@ -21,7 +21,7 @@ import System.FilePath ((<.>), (</>))
 import System.IO (hPutStrLn, stderr)
 
 import NginxConf (toNginxConf)
-import Types (Named (..), Server, Upstream, name)
+import Types (Named (..), Server, Upstream, config, locations, name, path, proxyPass, upstream)
 
 -- ===================== CLI =====================
 
@@ -92,6 +92,25 @@ decodeKvBatch body = case eitherDecode body :: Either String (Maybe [Value]) of
     Left err      -> Left ("failed to parse Consul KV response: " <> T.pack err)
     Right results -> Right (partitionEithers results)
 
+-- ===================== validation =====================
+
+-- | Every `proxy_pass.upstream` must name a key among the decoded
+-- upstreams - otherwise nginx would either reject it at "nginx -t" (no
+-- matching named "upstream {}" block) or, worse, silently treat it as a
+-- literal external hostname to resolve via DNS if a resolver happens to
+-- be configured elsewhere in the real deployment. A typo'd name should
+-- fail loudly here instead, with the exact server/location/name named.
+danglingUpstreamRefs :: [Server] -> [Upstream] -> [T.Text]
+danglingUpstreamRefs servers upstreams =
+  [ server ^. name <> ": location \"" <> loc ^. path <> "\" proxies to upstream \""
+      <> pp ^. upstream <> "\", which is not defined"
+  | server <- servers
+  , loc <- server ^. config . locations
+  , Just pp <- [loc ^. proxyPass]
+  , pp ^. upstream `notElem` upstreamNames
+  ]
+  where upstreamNames = map (^. name) upstreams
+
 -- ===================== render =====================
 
 -- | Renders each server/upstream to its own "<name>.conf" in a fresh
@@ -128,6 +147,9 @@ main = do
     -- live. Zero upstreams alone is fine (a server may not proxy to one).
     Right ([], _) -> do
       hPutStrLn stderr "no servers found; refusing to render an empty generation"
+      exitFailure
+    Right (servers, upstreams) | refs@(_ : _) <- danglingUpstreamRefs servers upstreams -> do
+      mapM_ (hPutStrLn stderr . T.unpack) refs
       exitFailure
     Right (servers, upstreams) -> do
       genDir <- renderGeneration (confDir args) servers upstreams

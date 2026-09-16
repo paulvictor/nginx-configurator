@@ -52,11 +52,14 @@ this file is just the "what was decided," not the "why" in full.
   though that's a legitimate decode result - zero *upstreams* alone is
   fine. Rendering an empty generation and letting a swap script put it
   live would mean nginx listens on nothing.
-- No cross-cutting "assertions" mechanism currently validates that a
-  `proxy_pass` target is a real upstream name - tried and removed as
-  "needs workarounds to get right"; both the Haskell side and the Nix
-  side (below) currently leave this unvalidated. Revisit later, don't
-  assume it's already handled.
+- `Main.hs`'s `danglingUpstreamRefs` refuses to render (exits 1, same
+  precedent as the empty-`servers` check) if any `proxy_pass.upstream`
+  doesn't match a decoded `Upstream`'s name - added here, not on the Nix
+  side, since `Main.hs` is the one place `servers` and `upstreams` are
+  already decoded together. A Nix-side "assertions"-list version of this
+  same check was tried earlier and removed ("needs workarounds to get
+  right") - see "Things explicitly tried and rejected" below; don't
+  re-attempt that specific approach.
 - TLS certs: fixed, non-timestamped path per cert (`tlsCertPath` is one
   opaque string) - Vault Agent overwrites it in place on renewal; this
   program never manages cert files itself. `nginx -t` catches a missing
@@ -97,16 +100,24 @@ this file is just the "what was decided," not the "why" in full.
   `"parameters"` key (a normal nested option).
 - `extra_headers`/`extra_directives` use `lib.types.attrListOf lib.types.str`
   (nixpkgs' own type for "ordered, same-key-can-repeat" data), not a
-  custom pair-submodule. `proxy_pass` is authored as `{scheme; upstream;}`
-  (not one opaque string) so `upstream` is at least structured, even
-  though nothing currently validates it against `upstreams`.
-- Both of the above get converted to `Types.hs`'s actual wire shape
-  (`[[name,value],...]` arrays; a single `"scheme://upstream"` string)
-  via `apply` on the option itself, NOT a `config` section - a module's
-  `config` block can't reference that same option's own merged value
-  without infinite recursion; `apply` post-processes the value before
-  it's exposed anywhere, which is exactly the tool for "author shape A,
-  report shape B."
+  custom pair-submodule.
+- `extra_headers`/`extra_directives` get converted to `Types.hs`'s actual
+  wire shape (`[[name,value],...]` arrays) via `apply` on the option
+  itself, NOT a `config` section - a module's `config` block can't
+  reference that same option's own merged value without infinite
+  recursion; `apply` post-processes the value before it's exposed
+  anywhere, which is exactly the tool for "author shape A, report shape
+  B."
+- `proxy_pass` is authored as `{scheme; upstream;}` and, deliberately
+  unlike the above, stays that way in the wire JSON too - no `apply`, no
+  `"scheme://upstream"` string composition on the Nix side at all. This
+  is a genuine deviation from mirroring nginx's own `proxy_pass` syntax
+  (nginx itself takes one bare string), done so `upstream` survives as a
+  structured, independently-readable name through decoding; `Types.hs`'s
+  `ProxyPass` + `NginxConf`'s render do the `scheme <> "://" <> upstream`
+  composition on the Haskell side instead. `upstream` is now validated
+  against `upstreams`' keys, but in `Main.hs`, not here - see
+  `danglingUpstreamRefs` above.
 - `nix/ngnix.nix` returns `{ ast; configFile; generated; }`, but these are
   **three independent functions**, not three pre-computed values - each
   takes the same `{ pkgs, lib ? pkgs.lib, modules ? [ ], specialArgs ? {

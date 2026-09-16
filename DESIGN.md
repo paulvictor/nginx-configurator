@@ -47,9 +47,9 @@ why that fold existed). Two decisions drove the current shape:
   referenced by name from *any* server/location via `proxy_pass
   http://name;` - it was never actually server-scoped, that was a modeling
   artifact of the original KV layout. Promoting it costs nothing in
-  validation: `Location.proxy_pass`/`ServerConfig.proxy` already reference
-  an upstream by an *unchecked* `Text` name, with no compile/parse-time
-  link to a specific `Upstream` value - a typo'd name only ever surfaced at
+  validation: `Location.proxy_pass.upstream` already references an
+  upstream by an *unchecked* `Text` name, with no compile/parse-time link
+  to a specific `Upstream` value - a typo'd name only ever surfaced at
   `nginx -t`, same as today. This also means an upstream can now be shared
   across multiple servers, which the old per-server nesting couldn't
   express at all.
@@ -212,14 +212,17 @@ understood, and either side can be read on its own.
   redundant at best and a silent drift risk at worst (nginx has already
   changed at least one of these defaults across versions).
 
-- **`Location.proxy_pass` carries nginx's own full `proxy_pass` target,
-  scheme included** (e.g. `"http://backend"` or `"https://backend"`), not
-  just a bare upstream name with a scheme hardcoded onto it at render time.
-  This is why it stays outside `ProxyParameters` as its own plain field
-  (also because it's the one proxy-module directive that's location-only,
-  not valid at the server level - see the top of the Proxy section in
-  `Types.hs`): the KV entry itself decides whether a location proxies to
-  plain HTTP or TLS upstream, not this code.
+- **`Location.proxy_pass` is a small `ProxyPass { scheme; upstream }`
+  record, not nginx's own bare `"http://backend"` string** - a deliberate
+  deviation from mirroring nginx's own directive syntax, kept this way so
+  `upstream` survives as a structured, independently-readable name all
+  the way through decoding; `NginxConf`'s render composes the two back
+  into the literal `proxy_pass http://backend;` text. It stays outside
+  `ProxyParameters` as its own plain field (also because it's the one
+  proxy-module directive that's location-only, not valid at the server
+  level - see the top of the Proxy section in `Types.hs`): the KV entry
+  itself decides whether a location proxies to plain HTTP or TLS
+  upstream, not this code.
 
 - **Ordered-list-of-tagged-variants pattern**, used for anything where
   nginx evaluates multiple directives of the same kind in the order
@@ -388,6 +391,16 @@ understood, and either side can be read on its own.
   check is intentionally separate from `decodeKvBatch`'s own `Left`/
   `Right` distinction - it does NOT change what counts as a decode error,
   it's a second, render-time guard on top of a successful decode.
+
+- **`main` also refuses to render if any `Location.proxy_pass.upstream`
+  doesn't name a decoded `Upstream`** (`danglingUpstreamRefs`, same
+  guard-before-`renderGeneration` shape as the empty-`servers` check
+  above, checked after it). Every offending server/location/name is
+  reported in one pass (not just the first) before exiting 1. This is
+  the one place in the whole pipeline that can do this check at all,
+  since it's the one point `servers` and `upstreams` are both already in
+  hand together - see `location.nix`'s own note (Part 2) for why this
+  isn't done on the Nix side.
 
 - **One file per server/upstream, not one shared file.**
   `renderGeneration` writes each server to its own `servers/<name>.conf`
@@ -783,20 +796,25 @@ interchangeable:
 `Location`'s name on the Haskell side: it's not rendered (the real,
 user-visible identity of a location is its `path`), and locations don't
 get written to their own output file the way servers/upstreams do.
-`proxy_pass` is *authored* as `scheme`/`upstream` (rather than one opaque
-`"http://backend"` string, the shape `Types.hs`'s own `ServerConfig`
-field actually decodes) so `upstream` is at least structured enough to
-validate later. Cross-checking that `upstream` is actually a key in the
-top-level `upstreams` attrset would need `upstreams` and `servers`
-evaluated together (so it can't be a type-level constraint here) - there
-used to be an "assertions" check for exactly that, dropped for now (some
-workarounds needed to get it right), so this is currently unvalidated;
-revisit later. The option's own `apply = v: if v == null then null else
-"${v.scheme}://${v.upstream}";` recombines it back into the single
-string `Types.hs` actually expects, so `config.proxy_pass` itself is
-already wire-ready - see the "Why `apply`, not a `config` section" note
-further below for why this lives on the option, not as a separate
-transform step.
+`proxy_pass` is authored as `scheme`/`upstream`, and - deliberately,
+unlike every other field here - the wire JSON keeps it that way too:
+`{"scheme":"http","upstream":"backend"}`, not nginx's own bare
+`"http://backend"` string. This is a genuine deviation from mirroring
+nginx's own directive syntax (see `Types.hs`'s `ProxyPass` and
+`NginxConf`'s render, which does the `scheme <> "://" <> upstream`
+composition), made specifically so `upstream` survives as a structured,
+independently-readable name all the way to the Haskell side, rather than
+a substring of an opaque URL a Nix `apply` would otherwise have to
+compose (and any validator would have to re-parse back apart). Nix's own
+`location.nix` no longer has an `apply` on this option at all - it just
+passes the submodule through unchanged. Cross-checking that `upstream` is
+actually a key in the top-level `upstreams` attrset is now done in
+`Main.hs` (`danglingUpstreamRefs`), not here - a NixOS "assertions"-based
+attempt at this same check was tried earlier and dropped (see "Things
+explicitly tried and rejected" in `MEMORY.md`); `Main.hs` is the natural
+place instead, since it already decodes `servers` and `upstreams`
+together and can refuse to render (same precedent as its empty-`servers`
+check) with a precise, per-location error message.
 
 **`servers.nix`** - the schema root for `servers`, mirroring this
 project's Consul KV layout (see "Part 1"'s "KV layout" section above).
@@ -829,10 +847,12 @@ this file's own `attrsOf`), not a field here.
 `eval.nix` in `nix/modules/`. `evaluated.config.ngnix.settings` (from
 `lib.evalModules { modules = [ ./mixin.nix ] ++ modules; }`) is already
 directly convertible to JSON, with no separate post-processing step
-needed, because every field that needs a different authored-vs-wire shape
-(`extra_headers`/`extra_directives`, `proxy_pass`) handles that itself
-via `apply` on its own `mkOption` (see `helpers.nix`'s `pairListToArray`
-note and `location.nix`'s `proxy_pass` note above).
+needed: fields that need a different authored-vs-wire shape
+(`extra_headers`/`extra_directives`) handle that themselves via `apply`
+on their own `mkOption` (see `helpers.nix`'s `pairListToArray` note);
+`proxy_pass` is the one exception, passed through unchanged since its
+authored and wire shapes are now the same `{scheme;upstream;}` object
+(see `location.nix`'s `proxy_pass` note above).
 
 **`mixin.nix`** - wraps `servers.nix`/`upstreams.nix` under one
 `options.ngnix.settings` (`type = submoduleWith { modules = [ ./servers.nix

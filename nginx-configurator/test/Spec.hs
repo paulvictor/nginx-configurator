@@ -107,7 +107,7 @@ main = hspec $ do
       l <- decodeOrFail
              (object
                [ "path" .= ("/legacy" :: Text)
-               , "proxy_pass" .= ("https://backend" :: Text)
+               , "proxy_pass" .= object [ "scheme" .= ("https" :: Text), "upstream" .= ("backend" :: Text) ]
                , "proxy" .= object
                    [ "http_version" .= ("1.0" :: Text)
                    , "set_header" .= object
@@ -122,7 +122,7 @@ main = hspec $ do
              :: IO Location
       let rendered = toNginxConf l
       rendered `shouldContainAll`
-        [ "proxy_pass https://backend;"  -- scheme comes from the JSON value, not hardcoded
+        [ "proxy_pass https://backend;"  -- scheme comes from the JSON value, not defaulted
         , "proxy_http_version 1.0;"
         , "proxy_set_header Connection \"\";"
         , "proxy_set_header X-Real-IP \"$remote_addr\";"
@@ -142,7 +142,7 @@ main = hspec $ do
       l <- decodeOrFail
              (object
                [ "path" .= ("/bar" :: Text)
-               , "proxy_pass" .= ("http://backend" :: Text)
+               , "proxy_pass" .= object [ "upstream" .= ("backend" :: Text) ]
                , "extra_headers" .=
                    ([ ["Access-Control-Allow-Origin", "*"]
                     , ["Access-Control-Allow-Methods", "GET, POST"]
@@ -346,7 +346,7 @@ barJson :: Value
 barJson = object
   [ "path" .= ("/bar" :: Text)
   , "match" .= ("prefix_exact" :: Text)
-  , "proxy_pass" .= ("http://backend" :: Text)
+  , "proxy_pass" .= object [ "upstream" .= ("backend" :: Text) ]
   , "extra_includes" .= (["/etc/nginx/backend-common.conf"] :: [Text])
   ]
 
