@@ -9,10 +9,11 @@ nginx was originally a static, log-processor-specific proxy: one hardcoded
 (`modules/nginx/logprocessor.nix`), plus a small `confd` job rendering a
 handful of `map $host ...` blocks from Consul KV. The goal of this package
 is to make nginx a general-purpose, Consul-KV-driven load balancer instead:
-whole `server {}` / `location {}` / `upstream {}` definitions become data
-that lives in Consul KV as JSON, and this program compiles them into nginx
-config files. The log-processor's routes become just one more site defined
-this way, not a special case baked into the module.
+whole `server {}`/`upstream {}` definitions - each server carrying its
+own nested `location {}` blocks - become data that lives in Consul KV as
+JSON, and this program compiles them into nginx config files. The
+log-processor's routes become just one more site defined this way, not a
+special case baked into the module.
 
 This program (the "renderer") deliberately does only one job: fetch +
 decode + write files. It never runs `nginx -t`, never reloads nginx, and
