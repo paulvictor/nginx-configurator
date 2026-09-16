@@ -1,5 +1,7 @@
 # NixOS service module wiring a Consul agent watch to nginx-configurator:
-# render -> test -> swap `current` -> reload. Does not start/manage nginx.
+# render -> test -> swap `current` -> reload. Wires the rendered config
+# into `services.nginx` (group/package/appendHttpConfig) - assumes nginx
+# runs on this same host - but never enables/starts it itself.
 #
 # Reload runs as the unprivileged "consul" user via `systemctl reload`,
 # authorized by a narrow polkit rule below rather than a bare signal send.
@@ -90,6 +92,11 @@ in
 
     # Changing this file doesn't restart Consul on its own.
     services.consul.extraConfigFiles = [ (toString watchSpecFile) ];
+
+    services.nginx.appendHttpConfig = ''
+      include ${cfg.confDir}/current/upstreams/*.conf;
+      include ${cfg.confDir}/current/servers/*.conf;
+    '';
 
     # Lets the "consul" agent user reload nginx.service, nothing broader.
     security.polkit.enable = lib.mkDefault true;
