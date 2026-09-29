@@ -15,6 +15,7 @@ import Control.Lens
 import Data.Aeson (Key, Value (..))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
+import Data.List.NonEmpty (toList)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Text.Strict.Lens (packed)
@@ -153,7 +154,7 @@ instance NginxConf Location where
 instance NginxConf (Named ServerConfig) where
   toNginxConf named = T.unlines $
     [ "server {" ]
-    <> (renderListen <$> cfg ^. listen)
+    <> toList (renderListen <$> cfg ^. listen)
     <> [ "  server_name " <> T.unwords (cfg ^. serverName) <> ";" ]
     <> [ "  http2 on;" | cfg ^. http2 ]
     <> maybe [] (\c -> [ "  ssl_certificate " <> c <> ";"
@@ -166,7 +167,7 @@ instance NginxConf (Named ServerConfig) where
     -- Mechanically derived, not user-set: nginx needs to tell the upstream
     -- which port the client actually connected on.
     <> [ "  proxy_set_header X-Forwarded-Port " <> ls ^. port.re _Show.packed <> ";"
-       | ls <- cfg ^. listen, ls ^. ssl ]
+       | ls <- toList (cfg ^. listen), ls ^. ssl ]
     <> (toNginxConf <$> cfg ^. locations)
     <> [ "}" ]
     where

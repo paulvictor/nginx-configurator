@@ -35,7 +35,7 @@ in
         };
 
         listen = mkOption {
-          type = listOf listen;
+          type = nonEmptyListOf listen;
         };
 
         http2 = mkOption {

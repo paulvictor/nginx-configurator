@@ -20,6 +20,7 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser)
 import Data.Char (toLower)
 import Data.Default.Class (Default (..))
+import Data.List.NonEmpty (NonEmpty)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
@@ -444,7 +445,9 @@ data ServerConfig = ServerConfig
                                        -- extra_directives) since it's a first-class,
                                        -- always-relevant part of a server block, unlike
                                        -- one-off directives like the removed "hsts".
-  , _listen           :: [Listen]
+  , _listen           :: NonEmpty Listen -- a server with no listen at all binds no
+                                       -- port, which is never a valid config nginx
+                                       -- itself would accept either
   , _http2            :: Bool
   , _tlsCertPath      :: Maybe Text    -- same file used for cert + key
   , _extraHeaders     :: [(Text, Text)]  -- extra add_header name/value pairs, site-wide. Shared
