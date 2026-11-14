@@ -1,3 +1,4 @@
 /.agent-shell/
 dist-newstyle/
 /result
+/node_modules/
