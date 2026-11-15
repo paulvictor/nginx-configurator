@@ -163,7 +163,7 @@ parseOptionalProxy o = o .:? "proxy" >>= maybe (pure def) parseProxyParams
 -- fields never become ambiguous accessor functions - only the generated
 -- lenses are ever used).
 data UpstreamServer = UpstreamServer
-  { _address    :: Text  -- "log-processor-backend.service.consul:8080"
+  { _address    :: Text  -- "backend.service.consul:8080"
   , _parameters :: KeyMap Value
   } deriving (Show, Generic)
 

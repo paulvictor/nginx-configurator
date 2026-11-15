@@ -6,7 +6,7 @@ with types;
     address = mkOption {
       type = str;
       description = ''
-        e.g. "log-processor-backend.service.consul:8080".
+        e.g. "backend.service.consul:8080".
       '';
     };
 

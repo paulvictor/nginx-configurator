@@ -24,7 +24,9 @@ let
 in
 {
   options.servers = mkOption {
-    type = attrsOf (submodule {
+    type = attrsOf (submoduleWith {
+      shorthandOnlyDefinesConfig = false;
+      modules = [{
       options = {
         server_name = mkOption {
           type = listOf str;
@@ -105,6 +107,7 @@ in
           default = [ ];
         };
       };
+      }];
     });
     default = { };
     description = ''

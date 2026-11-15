@@ -57,6 +57,7 @@
 
         terranix.terranixConfigurations.default.modules = [
           nginx-configurator.lib.ngnixModule
+          nginx-configurator.lib.ngnixConsulModule
           ./consul-kv.nix
         ];
 

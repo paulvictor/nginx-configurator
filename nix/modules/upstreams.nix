@@ -3,7 +3,9 @@ with lib;
 with types;
 {
   options.upstreams = mkOption {
-    type = attrsOf (submodule {
+    type = attrsOf (submoduleWith {
+      shorthandOnlyDefinesConfig = false;
+      modules = [{
       options = {
         resolver = mkOption {
           type = nullOr (submodule ./resolver.nix);
@@ -37,6 +39,7 @@ with types;
           description = ''e.g. "2m".'';
         };
       };
+      }];
     });
     default = { };
     apply = mapAttrs (name: cfg:

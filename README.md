@@ -65,6 +65,15 @@ its own option docs. Populate the KV data itself with
 another Terraform provider, etc.) - the schema doesn't care how the KV
 gets written, only its shape.
 
+In a terranix tree, `lib.ngnixConsulModule` (`nix/modules/consul.nix`)
+turns `ngnix.settings` into the `consul_keys.nginx` Terraform resource
+(`<ngnix.key_prefix>{servers,upstreams}/<name>`, default prefix
+`nginx/conf/`, `delete = true`): import it next to `lib.ngnixModule` and
+that's the whole switch - no options of its own, no `depends_on`/
+`provider.consul` (the consumer's Terraform setup owns those). The
+`ngnix.key_prefix` option (declared with `ngnix.settings`) is the one knob.
+With no servers or upstreams it emits nothing.
+
 ## More detail
 
 - `DESIGN.md` - full design rationale, decision-by-decision, both halves.

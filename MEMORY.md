@@ -132,6 +132,28 @@ this file is just the "what was decided," not the "why" in full.
   generation timestamp inside is whatever the Nix sandbox's clock happens
   to be - accepted, since this is for inspection/testing, not a live
   deployment artifact.
+- `nix/modules/consul.nix` (`lib.ngnixConsulModule`): terranix module, no
+  options - importing it is the switch. Generates
+  `resource.consul_keys.nginx.key` (`nginx/conf/{servers,upstreams}/<name>`,
+  `value = toJSON`, `delete = true`) from `config.ngnix.settings`, only when
+  there is at least one server/upstream (`mkIf` at the top of `config`, not on
+  the leaf: terranix's `resource` is an `attrs`-ish type that won't discharge
+  a nested `mkIf`). The prefix is the option `ngnix.key_prefix` (mixin.nix,
+  default `nginx/conf/`, trailing slash included; the NixOS module's
+  `services.nginx-config.keyPrefix` and the jq payload in `ngnix.nix` keep
+  their own literal); no `depends_on`/
+  `lifecycle`/`provider.consul` - the consumer's Terraform owns those. Reads
+  `config.ngnix.settings` in the same eval: its values are post-`apply` wire
+  shape and must not be fed back into `ngnixModule` as input. Replaces the
+  hand-written `consul_keys` in `templates/terranix-consul/consul-kv.nix`.
+- `servers.nix`/`upstreams.nix` entries are `attrsOf (submoduleWith {
+  shorthandOnlyDefinesConfig = false; modules = [ {...} ]; })`, not
+  `submodule`: `submodule` sets `shorthandOnlyDefinesConfig = true`, so a
+  definition like `ngnix.settings.servers.x = { imports = [ ... ]; }` was read
+  as config (`option ... imports does not exist`). Now `imports` (and
+  `options`/`config`) work in an entry's definition, e.g. to merge modules
+  authored elsewhere into it. The module body in those two files is left at its
+  old indentation to keep the diff small.
 
 ## Deferred ideas (not implemented yet, revisit later)
 
