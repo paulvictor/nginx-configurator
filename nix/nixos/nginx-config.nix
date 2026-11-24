@@ -20,6 +20,7 @@ let
     error_log /dev/null;
     http {
       access_log off;
+      server_names_hash_bucket_size 128;
       include servers/*.conf;
       include upstreams/*.conf;
     }
